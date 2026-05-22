@@ -1,0 +1,4823 @@
+<html lang="en"><head>
+<script id="aura-supabase-token-firewall">(function () {
+  if (window.__AURA_SUPABASE_FIREWALL__) return;
+  window.__AURA_SUPABASE_FIREWALL__ = true;
+
+  var SUPABASE_HOST = "hoirqrkdgbmvpwutwuwj.supabase.co";
+  var BLOCKED_KEY_PATTERNS = [
+    /^sb-[a-z0-9-]+-auth-token$/i,
+    /^supabase\.auth\.token$/i
+  ];
+
+  function isBlockedStorageKey(key) {
+    if (typeof key !== "string") return false;
+    for (var i = 0; i < BLOCKED_KEY_PATTERNS.length; i++) {
+      if (BLOCKED_KEY_PATTERNS[i].test(key)) return true;
+    }
+    return false;
+  }
+
+  function toAbsoluteUrl(input) {
+    try {
+      return new URL(input, window.location.href);
+    } catch {
+      return null;
+    }
+  }
+
+  function isSupabaseDestination(input) {
+    var parsed = toAbsoluteUrl(input);
+    if (!parsed) return false;
+    if (SUPABASE_HOST && parsed.host === SUPABASE_HOST) return true;
+    return parsed.host.endsWith(".supabase.co");
+  }
+
+  function pathLooksSensitive(input) {
+    var parsed = toAbsoluteUrl(input);
+    if (!parsed) return false;
+    return /^\/(auth|rest|functions)\/v1\//.test(parsed.pathname || "");
+  }
+
+  function headersContainAuth(headersLike) {
+    if (!headersLike) return false;
+
+    try {
+      if (typeof Headers !== "undefined" && headersLike instanceof Headers) {
+        return !!(headersLike.get("authorization") || headersLike.get("apikey"));
+      }
+    } catch {}
+
+    if (Array.isArray(headersLike)) {
+      for (var i = 0; i < headersLike.length; i++) {
+        var pair = headersLike[i] || [];
+        var name = String(pair[0] || "").toLowerCase();
+        if (name === "authorization" || name === "apikey") return true;
+      }
+      return false;
+    }
+
+    if (typeof headersLike === "object") {
+      var keys = Object.keys(headersLike);
+      for (var j = 0; j < keys.length; j++) {
+        var k = keys[j].toLowerCase();
+        if (k === "authorization" || k === "apikey") return true;
+      }
+    }
+    return false;
+  }
+
+  function requestLooksSensitive(input, init, extraHeaders) {
+    var url = "";
+    try {
+      if (typeof input === "string") {
+        url = input;
+      } else if (input && typeof input.url === "string") {
+        url = input.url;
+      }
+    } catch {}
+
+    var headers =
+      (init && init.headers) ||
+      (input && input.headers) ||
+      extraHeaders ||
+      null;
+    var hasAuthHeaders = headersContainAuth(headers);
+    if (hasAuthHeaders) return true;
+
+    if (!url) return false;
+    if (isSupabaseDestination(url) && pathLooksSensitive(url)) return true;
+    return false;
+  }
+
+  function patchStorage(storage, storageName) {
+    if (!storage) return;
+    var proto = Object.getPrototypeOf(storage);
+    if (!proto || proto.__auraSupabaseFirewallPatched) return;
+
+    var rawGetItem = proto.getItem;
+    var rawSetItem = proto.setItem;
+    var rawRemoveItem = proto.removeItem;
+    var rawClear = proto.clear;
+    var rawKey = proto.key;
+    var rawLengthDescriptor = Object.getOwnPropertyDescriptor(proto, "length");
+    var rawLengthGet = rawLengthDescriptor && rawLengthDescriptor.get;
+
+    function getRawLength(instance) {
+      try {
+        if (rawLengthGet) return Number(rawLengthGet.call(instance) || 0);
+      } catch {}
+      try {
+        return Number(instance.length || 0);
+      } catch {}
+      return 0;
+    }
+
+    function getVisibleKeys(instance) {
+      var visible = [];
+      var total = getRawLength(instance);
+      for (var i = 0; i < total; i++) {
+        var currentKey = rawKey.call(instance, i);
+        if (currentKey && !isBlockedStorageKey(currentKey)) {
+          visible.push(currentKey);
+        }
+      }
+      return visible;
+    }
+
+    function maskBlockedKeyProperty(instance, keyName) {
+      if (!keyName || !isBlockedStorageKey(keyName)) return;
+      try {
+        Object.defineProperty(instance, keyName, {
+          configurable: true,
+          enumerable: false,
+          get: function () {
+            return null;
+          },
+          set: function () {
+            return true;
+          }
+        });
+      } catch {}
+    }
+
+    function syncBlockedKeyProperties(instance) {
+      var total = getRawLength(instance);
+      for (var i = 0; i < total; i++) {
+        var k = rawKey.call(instance, i);
+        if (k) maskBlockedKeyProperty(instance, k);
+      }
+    }
+
+    proto.getItem = function (key) {
+      syncBlockedKeyProperties(this);
+      if (isBlockedStorageKey(String(key))) return null;
+      return rawGetItem.call(this, key);
+    };
+
+    proto.setItem = function (key, value) {
+      if (isBlockedStorageKey(String(key))) return;
+      return rawSetItem.call(this, key, value);
+    };
+
+    proto.removeItem = function (key) {
+      if (isBlockedStorageKey(String(key))) return;
+      return rawRemoveItem.call(this, key);
+    };
+
+    proto.clear = function () {
+      if (typeof rawClear !== "function") return;
+
+      // Preserve blocked keys across clear() to prevent auth token/session wipe.
+      var preservedBlockedEntries = [];
+      var total = getRawLength(this);
+      for (var i = 0; i < total; i++) {
+        var blockedKey = rawKey.call(this, i);
+        if (blockedKey && isBlockedStorageKey(blockedKey)) {
+          preservedBlockedEntries.push([
+            blockedKey,
+            rawGetItem.call(this, blockedKey),
+          ]);
+        }
+      }
+
+      rawClear.call(this);
+
+      for (var j = 0; j < preservedBlockedEntries.length; j++) {
+        var entry = preservedBlockedEntries[j];
+        var key = entry[0];
+        var value = entry[1];
+        if (typeof key === "string" && typeof value === "string") {
+          rawSetItem.call(this, key, value);
+        }
+      }
+
+      syncBlockedKeyProperties(this);
+    };
+
+    proto.key = function (index) {
+      syncBlockedKeyProperties(this);
+      var visible = getVisibleKeys(this);
+      return visible[index] || null;
+    };
+
+    try {
+      Object.defineProperty(proto, "length", {
+        configurable: true,
+        enumerable: false,
+        get: function () {
+          syncBlockedKeyProperties(this);
+          return getVisibleKeys(this).length;
+        }
+      });
+    } catch {}
+
+    var proxyStorage = null;
+    try {
+      proxyStorage = new Proxy(storage, {
+        get: function (target, prop) {
+          if (typeof prop === "string" && isBlockedStorageKey(prop)) return null;
+          if (prop === "length") return getVisibleKeys(target).length;
+          if (prop === "key") {
+            return function (index) {
+              var visible = getVisibleKeys(target);
+              return visible[index] || null;
+            };
+          }
+          if (prop === "clear") {
+            return function () {
+              if (typeof rawClear !== "function") return;
+
+              var preservedBlockedEntries = [];
+              var total = getRawLength(target);
+              for (var i = 0; i < total; i++) {
+                var blockedKey = rawKey.call(target, i);
+                if (blockedKey && isBlockedStorageKey(blockedKey)) {
+                  preservedBlockedEntries.push([
+                    blockedKey,
+                    rawGetItem.call(target, blockedKey),
+                  ]);
+                }
+              }
+
+              rawClear.call(target);
+
+              for (var j = 0; j < preservedBlockedEntries.length; j++) {
+                var entry = preservedBlockedEntries[j];
+                var key = entry[0];
+                var value = entry[1];
+                if (typeof key === "string" && typeof value === "string") {
+                  rawSetItem.call(target, key, value);
+                }
+              }
+
+              syncBlockedKeyProperties(target);
+            };
+          }
+
+          var value = target[prop];
+          if (typeof value === "function") return value.bind(target);
+          return value;
+        },
+        set: function (target, prop, value) {
+          if (typeof prop === "string" && isBlockedStorageKey(prop)) return true;
+          target[prop] = value;
+          return true;
+        },
+        has: function (target, prop) {
+          if (typeof prop === "string" && isBlockedStorageKey(prop)) return false;
+          return prop in target;
+        },
+        deleteProperty: function (target, prop) {
+          if (typeof prop === "string" && isBlockedStorageKey(prop)) return true;
+          try {
+            delete target[prop];
+          } catch {}
+          return true;
+        },
+        ownKeys: function (target) {
+          return getVisibleKeys(target);
+        },
+        getOwnPropertyDescriptor: function (target, prop) {
+          if (typeof prop === "string" && isBlockedStorageKey(prop)) {
+            return undefined;
+          }
+          if (prop === "length") {
+            return {
+              configurable: true,
+              enumerable: false,
+              value: getVisibleKeys(target).length,
+              writable: false
+            };
+          }
+          return Object.getOwnPropertyDescriptor(target, prop);
+        }
+      });
+    } catch {}
+
+    try {
+      if (proxyStorage) {
+        Object.defineProperty(window, storageName, {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            return proxyStorage;
+          }
+        });
+      }
+    } catch {}
+
+    syncBlockedKeyProperties(storage);
+    proto.__auraSupabaseFirewallPatched = true;
+  }
+
+  function patchCookieAccess() {
+    try {
+      var cookieDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
+      if (!cookieDescriptor || !cookieDescriptor.configurable) return;
+
+      Object.defineProperty(document, "cookie", {
+        configurable: true,
+        enumerable: false,
+        get: function () {
+          return "";
+        },
+        set: function () {
+          return true;
+        }
+      });
+    } catch {}
+  }
+
+  function patchFetch() {
+    if (typeof window.fetch !== "function") return;
+    var rawFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      if (requestLooksSensitive(input, init, null)) {
+        return Promise.reject(new Error("Blocked by Aura security policy"));
+      }
+      return rawFetch(input, init);
+    };
+  }
+
+  function patchXHR() {
+    if (typeof XMLHttpRequest === "undefined") return;
+    var rawOpen = XMLHttpRequest.prototype.open;
+    var rawSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+    var rawSend = XMLHttpRequest.prototype.send;
+
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__auraRequestUrl = String(url || "");
+      this.__auraHeaders = {};
+      return rawOpen.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+      if (!this.__auraHeaders) this.__auraHeaders = {};
+      this.__auraHeaders[String(name || "").toLowerCase()] = String(value || "");
+      return rawSetHeader.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.send = function () {
+      if (requestLooksSensitive(this.__auraRequestUrl || "", null, this.__auraHeaders || null)) {
+        throw new Error("Blocked by Aura security policy");
+      }
+      return rawSend.apply(this, arguments);
+    };
+  }
+
+  function patchBeacon() {
+    if (typeof navigator.sendBeacon !== "function") return;
+    var rawBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function (url, data) {
+      if (requestLooksSensitive(url, null, null)) return false;
+      return rawBeacon(url, data);
+    };
+  }
+
+  function patchWebSocket() {
+    if (typeof WebSocket === "undefined") return;
+    var RawWebSocket = WebSocket;
+    window.WebSocket = function (url, protocols) {
+      if (requestLooksSensitive(String(url || ""), null, null)) {
+        throw new Error("Blocked by Aura security policy");
+      }
+      return new RawWebSocket(url, protocols);
+    };
+    window.WebSocket.prototype = RawWebSocket.prototype;
+  }
+
+  patchStorage(window.localStorage, "localStorage");
+  patchStorage(window.sessionStorage, "sessionStorage");
+  patchCookieAccess();
+  patchFetch();
+  patchXHR();
+  patchBeacon();
+  patchWebSocket();
+})();</script>
+<!-- =========================================================
+AURA — Premium AI Personal Assistant
+Refactored structure only. Layout/classes preserved.
+========================================================== -->
+<!-- Meta -->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Page Title -->
+<title>AURA — Premium AI Personal Assistant</title>
+<!-- External Libraries -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"><!-- aura-ga4-start -->
+<script async="" src="https://www.googletagmanager.com/gtag/js?id=G-2M6V79H761"></script>
+<script>
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-2M6V79H761');
+</script>
+<!-- aura-ga4-end -->
+</head>
+
+<body class="bg-[#f3f5f8] text-slate-900 font-['Inter',sans-serif] min-h-screen relative overflow-x-hidden antialiased selection:bg-blue-100 selection:text-blue-900">
+
+<!-- Background (component) added by Aura -->
+<div class="aura-background-component fixed top-0 w-full h-screen -z-10 opacity-80" data-alpha-mask="80" style="; mask-image: linear-gradient(to bottom, transparent, black 0%, black 80%, transparent); -webkit-mask-image: linear-gradient(to bottom, transparent, black 0%, black 80%, transparent)"><div class="aura-background-component top-0 w-full -z-10 absolute h-full">
+  <div data-us-project="ty3N7ZPaIU7KlWixQFIc" class="absolute w-full h-full left-0 top-0 -z-10"></div>
+  <script type="text/javascript">
+    !function(){if(!window.UnicornStudio){window.UnicornStudio={isInitialized:!1};var i=document.createElement("script");i.src="https://cdn.jsdelivr.net/gh/hiunicornstudio/unicornstudio.js@v1.4.29/dist/unicornStudio.umd.js",i.onload=function(){window.UnicornStudio.isInitialized||(UnicornStudio.init(),window.UnicornStudio.isInitialized=!0)},(document.head || document.body).appendChild(i)}}();
+  </script>
+</div></div>
+
+  <!-- =========================================================
+       Background Effects
+  ========================================================== -->
+  
+  <style>
+    @keyframes auraAmbientDriftOne {
+  
+      0%,
+      100% {
+        transform: translate3d(0, 0, 0) scale(1);
+      }
+  
+      35% {
+        transform: translate3d(4vw, 3vh, 0) scale(1.06);
+      }
+  
+      70% {
+        transform: translate3d(-2vw, 5vh, 0) scale(0.98);
+      }
+    }
+  
+    @keyframes auraAmbientDriftTwo {
+  
+      0%,
+      100% {
+        transform: translate3d(0, 0, 0) scale(1);
+      }
+  
+      40% {
+        transform: translate3d(-4vw, -3vh, 0) scale(1.08);
+      }
+  
+      75% {
+        transform: translate3d(3vw, -5vh, 0) scale(0.96);
+      }
+    }
+  
+    @keyframes auraAmbientDriftThree {
+  
+      0%,
+      100% {
+        transform: translate3d(0, 0, 0) scale(1);
+      }
+  
+      50% {
+        transform: translate3d(2vw, -4vh, 0) scale(1.05);
+      }
+    }
+  
+    @keyframes auraDotDrift {
+      0% {
+        background-position: 0 0;
+      }
+  
+      100% {
+        background-position: 4rem 4rem;
+      }
+    }
+  
+    .aura-bg-blob-one {
+      animation: auraAmbientDriftOne 26s ease-in-out infinite;
+    }
+  
+    .aura-bg-blob-two {
+      animation: auraAmbientDriftTwo 32s ease-in-out infinite;
+    }
+  
+    .aura-bg-blob-three {
+      animation: auraAmbientDriftThree 30s ease-in-out infinite;
+    }
+  
+    .aura-bg-dots {
+      animation: auraDotDrift 38s linear infinite;
+    }
+  
+    @media (prefers-reduced-motion: reduce) {
+  
+      .aura-bg-blob-one,
+      .aura-bg-blob-two,
+      .aura-bg-blob-three,
+      .aura-bg-dots {
+        animation: none;
+      }
+    }
+  </style>
+  
+  <div class="fixed inset-0 z-0 overflow-hidden pointer-events-none">
+    <!-- Soft blue ambient glow -->
+    <div class="aura-bg-blob-one absolute top-[-12%] left-[-12%] w-[52vw] h-[52vw] rounded-full bg-blue-200/35 blur-[7.5rem] will-change-transform">
+    </div>
+  
+    <!-- Soft sky/silver glow -->
+    <div class="aura-bg-blob-two absolute bottom-[-18%] right-[-10%] w-[62vw] h-[62vw] rounded-full bg-sky-200/22 blur-[8.75rem] will-change-transform">
+    </div>
+  
+    <!-- White glassy light wash -->
+    <div class="aura-bg-blob-three absolute top-[36%] left-[36%] w-[30vw] h-[30vw] rounded-full bg-white/55 blur-[5rem] will-change-transform">
+    </div>
+  
+    <!-- Subtle moving dot texture -->
+    <div class="aura-bg-dots absolute inset-0 opacity-[0.22]" style="background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.09) 1px, transparent 0); background-size: 2rem 2rem;">
+    </div>
+  </div>
+
+  <!-- =========================================================
+       Header / Navigation
+  ========================================================== -->
+  
+  <style>
+    html {
+      scroll-behavior: smooth;
+    }
+  
+    :target {
+      scroll-margin-top: 7.5rem;
+    }
+  </style>
+  
+  <header class="fixed top-0 left-0 right-0 z-50">
+  
+    <nav class="max-w-7xl mx-auto px-6 pt-5">
+  
+      <div class="relative overflow-hidden rounded-full bg-white/84 backdrop-blur-2xl border border-white/90 shadow-[0_14px_38px_-22px_rgba(15,23,42,0.42),inset_0_1px_0_rgba(255,255,255,1)] px-4 py-3">
+  
+        <!-- Extra white layer so dark sections do not bleed through too much -->
+  
+        <div class="absolute inset-0 rounded-full bg-white/36 pointer-events-none"></div>
+  
+        <!-- Nav Content -->
+  
+        <div class="relative z-10 flex items-center justify-between">
+  
+          <!-- Brand -->
+  
+          <a href="#" class="flex items-center gap-3 group">
+  
+            <span class="w-9 h-9 rounded-full bg-gradient-to-b from-white to-slate-100 border border-slate-200 shadow-[0_2px_8px_rgba(15,23,42,0.06),inset_0_1px_0_white] flex items-center justify-center">
+  
+              <span class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.08em] text-blue-600">
+  
+                AU
+  
+              </span>
+  
+            </span>
+  
+            <span class="flex flex-col justify-center leading-none">
+  
+              <span class="font-['JetBrains_Mono',monospace] text-sm font-semibold tracking-[-0.08em] text-slate-950 group-hover:text-blue-600 transition-colors">
+  
+                AURA
+  
+              </span>
+  
+            <span class="mt-0.5 text-[10px] font-light tracking-[-0.03em] text-slate-400">
+  
+                Personal AI
+  
+              </span>
+  
+            </span>
+  
+          </a>
+  
+          <!-- Desktop Navigation -->
+  
+          <div class="hidden md:flex items-center gap-7 text-xs text-slate-600 font-normal">
+  
+            <a href="#features" class="relative transition-colors duration-300 hover:text-blue-600 after:absolute after:left-0 after:-bottom-1.5 after:h-px after:w-0 after:bg-blue-500 after:transition-all after:duration-300 hover:after:w-full">
+  
+              Features
+  
+            </a>
+  
+            <a href="#workflow" class="relative transition-colors duration-300 hover:text-blue-600 after:absolute after:left-0 after:-bottom-1.5 after:h-px after:w-0 after:bg-blue-500 after:transition-all after:duration-300 hover:after:w-full">
+  
+              Workflow
+  
+            </a>
+  
+            <a href="#built-for" class="relative transition-colors duration-300 hover:text-blue-600 after:absolute after:left-0 after:-bottom-1.5 after:h-px after:w-0 after:bg-blue-500 after:transition-all after:duration-300 hover:after:w-full">
+  
+              Built For
+  
+            </a>
+  
+            <a href="#privacy" class="relative transition-colors duration-300 hover:text-blue-600 after:absolute after:left-0 after:-bottom-1.5 after:h-px after:w-0 after:bg-blue-500 after:transition-all after:duration-300 hover:after:w-full">
+  
+              Privacy
+  
+            </a>
+  
+            <a href="#pricing" class="relative transition-colors duration-300 hover:text-blue-600 after:absolute after:left-0 after:-bottom-1.5 after:h-px after:w-0 after:bg-blue-500 after:transition-all after:duration-300 hover:after:w-full">
+  
+              Pricing
+  
+            </a>
+  
+          </div>
+  
+          <!-- Navigation CTAs -->
+  
+          <div class="flex items-center gap-2">
+  
+            <a href="#workflow" class="hidden sm:inline-flex items-center justify-center rounded-full px-4 py-2 text-xs text-slate-700 bg-white/78 border border-slate-200 shadow-[0_1px_2px_rgba(15,23,42,0.04),inset_0_1px_0_white] hover:bg-white hover:text-blue-600 hover:-translate-y-0.5 transition-all duration-300">
+  
+              Explore Workflow
+  
+            </a>
+  
+            <a href="#pricing" class="inline-flex items-center justify-center rounded-full px-4 py-2 text-xs text-white bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 shadow-[0_5px_14px_rgba(59,130,246,0.28),inset_0_1px_0_rgba(255,255,255,0.35)] hover:from-blue-400 hover:to-blue-500 hover:-translate-y-0.5 transition-all duration-300">
+  
+              Try AURA Free
+  
+            </a>
+  
+          </div>
+  
+        </div>
+  
+      </div>
+  
+    </nav>
+  
+  </header>
+
+  <!-- =========================================================
+       Main Content
+  ========================================================== -->
+  <main class="relative z-10">
+
+    <!-- =====================================================
+         Section 01 — Hero
+    ====================================================== -->
+    
+    <style>
+      @keyframes aura-float-soft {
+    
+        0%,
+        100% {
+          transform: translateY(0);
+        }
+    
+        50% {
+          transform: translateY(-8px);
+        }
+      }
+    
+      @keyframes aura-bubble-in {
+        0% {
+          opacity: 0;
+          transform: translateX(18px) translateY(8px) scale(0.96);
+          filter: blur(6px);
+        }
+    
+        100% {
+          opacity: 1;
+          transform: translateX(0) translateY(0) scale(1);
+          filter: blur(0);
+        }
+      }
+    
+      @keyframes aura-card-in {
+        0% {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+    
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    
+      .aura-float-bubble {
+        opacity: 0;
+        animation:
+          aura-bubble-in 700ms cubic-bezier(0.22, 1, 0.36, 1) forwards,
+          aura-float-soft 4.5s ease-in-out infinite;
+      }
+    
+      .aura-float-bubble:nth-child(1) {
+        animation-delay: 300ms, 1100ms;
+      }
+    
+      .aura-float-bubble:nth-child(2) {
+        animation-delay: 600ms, 1400ms;
+      }
+    
+      .aura-float-bubble:nth-child(3) {
+        animation-delay: 900ms, 1700ms;
+      }
+    
+      .aura-float-bubble:nth-child(4) {
+        animation-delay: 1200ms, 2000ms;
+      }
+    
+      .aura-hero-card {
+        opacity: 0;
+        animation: aura-card-in 700ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+      }
+    
+      .aura-hero-card:nth-child(1) {
+        animation-delay: 250ms;
+      }
+    
+      .aura-hero-card:nth-child(2) {
+        animation-delay: 450ms;
+      }
+    
+      .aura-hero-card:nth-child(3) {
+        animation-delay: 650ms;
+      }
+    
+      .aura-hero-card:nth-child(4) {
+        animation-delay: 850ms;
+      }
+    </style>
+    
+    <section class="max-w-7xl mx-auto px-6 pt-32 md:pt-40 pb-20">
+      <div class="grid lg:grid-cols-[1.02fr_0.98fr] gap-12 lg:gap-16 items-center">
+    
+        <!-- Hero Copy -->
+        <div class="text-center lg:text-left">
+    
+          <!-- Hero Label -->
+          <div class="inline-flex items-center gap-2 rounded-full bg-white/75 border border-white px-3.5 py-2 shadow-[0_6px_18px_-12px_rgba(15,23,42,0.3),inset_0_1px_0_white] mb-8">
+            <span class="w-7 h-7 rounded-full bg-gradient-to-b from-blue-50 to-white border border-blue-100 shadow-[inset_0_1px_0_white] flex items-center justify-center">
+              <iconify-icon icon="solar:stars-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+            </span>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-slate-500">
+              PREMIUM PERSONAL AI
+            </span>
+          </div>
+    
+          <!-- Hero Headline -->
+          <h1 class="text-[4rem] md:text-[5.2rem] lg:text-[6.4rem] font-light tracking-[-0.075em] leading-[0.92] text-slate-950" style="text-shadow: 0 1px 1px rgba(255,255,255,0.8);">
+            <span class="block whitespace-nowrap">
+              Think clearer.
+            </span>
+    
+            <span class="block whitespace-nowrap mt-2">
+              Stay organized.
+            </span>
+    
+            <span class="inline-flex whitespace-nowrap mt-4 rounded-[1.35rem] bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 px-4 md:px-5 pb-2.5 pt-1.5 text-white font-normal shadow-[0_18px_38px_-20px_rgba(59,130,246,0.55),inset_0_1px_0_rgba(255,255,255,0.38)] drop-shadow-[0_1px_1px_rgba(15,23,42,0.18)]">
+              Move faster.
+            </span>
+          </h1>
+    
+          <p class="mt-8 text-base md:text-lg leading-8 text-slate-600 font-light max-w-2xl mx-auto lg:mx-0">
+            AURA is your personal AI assistant for capturing thoughts,
+            summarizing notes, managing priorities, and turning scattered
+            information into calm, useful action.
+          </p>
+    
+          <!-- CTAs -->
+          <div class="mt-10 flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-3">
+            <a href="#pricing" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-full px-6 py-3.5 bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 text-white text-sm font-normal shadow-[0_10px_24px_rgba(59,130,246,0.26),inset_0_1px_0_rgba(255,255,255,0.35)] hover:from-blue-400 hover:to-blue-500 hover:-translate-y-0.5 active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.18)] transition-all duration-300">
+              Start Free Trial
+              <iconify-icon icon="solar:arrow-right-linear" style="stroke-width: 1.5;" class="text-lg"></iconify-icon>
+            </a>
+    
+            <a href="#workflow" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-full px-6 py-3.5 bg-gradient-to-b from-white to-slate-50 border border-slate-200 text-slate-700 text-sm font-normal shadow-[0_4px_12px_rgba(15,23,42,0.05),inset_0_1px_0_white] hover:from-slate-50 hover:to-slate-100 hover:-translate-y-0.5 transition-all duration-300">
+              <iconify-icon icon="solar:play-circle-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+              See How It Works
+            </a>
+          </div>
+    
+          <!-- Trust Row -->
+          <div class="mt-8 flex flex-col sm:flex-row flex-wrap items-center justify-center lg:justify-start gap-3 text-xs text-slate-500 font-light">
+            <span class="inline-flex items-center gap-2">
+              <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+              Private by design
+            </span>
+    
+            <span class="hidden sm:block w-1 h-1 rounded-full bg-slate-300"></span>
+    
+            <span class="inline-flex items-center gap-2">
+              <iconify-icon icon="solar:devices-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+              Works across desktop and mobile
+            </span>
+    
+            <span class="hidden sm:block w-1 h-1 rounded-full bg-slate-300"></span>
+    
+            <span class="inline-flex items-center gap-2">
+              <iconify-icon icon="solar:bolt-circle-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+              Built for busy minds
+            </span>
+          </div>
+        </div>
+    
+        <!-- Hero Product Mockup -->
+        <div class="relative lg:pl-4">
+          <div class="absolute -inset-8 rounded-[3rem] bg-gradient-to-br from-blue-200/40 via-white/20 to-sky-200/30 blur-3xl">
+          </div>
+    
+          <div class="relative rounded-[2rem] bg-[#f8fafc] border border-white shadow-[0_30px_80px_-35px_rgba(15,23,42,0.35),inset_0_2px_0_rgba(255,255,255,1)] p-4 sm:p-5">
+    
+            <!-- Floating Bubble Stack / Asymmetric Orbit -->
+            <div class="hidden md:block absolute inset-0 z-20 pointer-events-none">
+    
+              <!-- Bubble 01 — Top Right -->
+              <div class="aura-float-bubble absolute -right-7 top-10 rounded-2xl bg-white/90 backdrop-blur border border-white px-4 py-3 shadow-[0_18px_38px_-20px_rgba(15,23,42,0.45),inset_0_1px_0_white] min-w-[12rem]">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center">
+                    <iconify-icon icon="solar:bell-bing-linear" style="stroke-width: 1.5;" class="text-lg text-emerald-500"></iconify-icon>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-900 font-normal">
+                      Follow-up found
+                    </p>
+                    <p class="text-xs text-slate-400 font-light">
+                      Client reply due today
+                    </p>
+                  </div>
+                </div>
+              </div>
+    
+              <!-- Bubble 02 — Mid Right -->
+              <div class="aura-float-bubble absolute -right-7 top-[35%] rounded-2xl bg-white/90 backdrop-blur border border-white px-4 py-3 shadow-[0_18px_38px_-20px_rgba(15,23,42,0.45),inset_0_1px_0_white] min-w-[12rem]">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
+                    <iconify-icon icon="solar:document-text-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-900 font-normal">
+                      Summary ready
+                    </p>
+                    <p class="text-xs text-slate-400 font-light">
+                      18 pages into 9 bullets
+                    </p>
+                  </div>
+                </div>
+              </div>
+    
+              <!-- Bubble 03 — Lower Right -->
+              <div class="aura-float-bubble absolute -right-7 bottom-[26%] rounded-2xl bg-white/90 backdrop-blur border border-white px-4 py-3 shadow-[0_18px_38px_-20px_rgba(15,23,42,0.45),inset_0_1px_0_white] min-w-[12rem]">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full bg-indigo-50 flex items-center justify-center">
+                    <iconify-icon icon="solar:calendar-mark-linear" style="stroke-width: 1.5;" class="text-lg text-indigo-500"></iconify-icon>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-900 font-normal">
+                      Focus block saved
+                    </p>
+                    <p class="text-xs text-slate-400 font-light">
+                      10:30–12:00 protected
+                    </p>
+                  </div>
+                </div>
+              </div>
+    
+              <!-- Bubble 04 — Bottom Left -->
+              <div class="aura-float-bubble absolute left-8 -bottom-6 rounded-2xl bg-white/90 backdrop-blur border border-white px-4 py-3 shadow-[0_18px_38px_-20px_rgba(15,23,42,0.45),inset_0_1px_0_white] min-w-[12rem]">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center">
+                    <iconify-icon icon="solar:chat-round-dots-linear" style="stroke-width: 1.5;" class="text-lg text-slate-600"></iconify-icon>
+                  </div>
+                  <div>
+                    <p class="text-xs text-slate-900 font-normal">
+                      Reply drafted
+                    </p>
+                    <p class="text-xs text-slate-400 font-light">
+                      Ready for review
+                    </p>
+                  </div>
+                </div>
+              </div>
+    
+            </div>
+    
+            <div class="rounded-[1.5rem] bg-gradient-to-b from-white to-slate-50 border border-slate-200 shadow-[inset_0_1px_0_white] overflow-hidden">
+    
+              <!-- Mockup Top Bar -->
+              <div class="px-5 py-4 flex items-center justify-between border-b border-slate-200/80">
+                <div class="flex items-center gap-2">
+                  <span class="w-2.5 h-2.5 rounded-full bg-red-300"></span>
+                  <span class="w-2.5 h-2.5 rounded-full bg-amber-300"></span>
+                  <span class="w-2.5 h-2.5 rounded-full bg-emerald-300"></span>
+                </div>
+    
+                <div class="font-['JetBrains_Mono',monospace] text-xs text-slate-400 tracking-[-0.05em]">
+                  DAILY BRIEF
+                </div>
+              </div>
+    
+              <!-- Mockup Content -->
+              <div class="p-5 sm:p-6">
+                <div class="flex items-start justify-between gap-4 mb-6">
+                  <div>
+                    <p class="text-xs text-slate-400 font-light mb-1">
+                      Today
+                    </p>
+    
+                    <h2 class="text-2xl md:text-3xl font-normal tracking-tight text-slate-900">
+                      Your priorities are ready.
+                    </h2>
+                  </div>
+    
+                  <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 shadow-[inset_0_1px_0_white]">
+                    <iconify-icon icon="solar:stars-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+                  </div>
+                </div>
+    
+                <div class="grid gap-3">
+    
+                  <!-- Animated Product Card -->
+                  <div class="aura-hero-card rounded-2xl bg-white border border-slate-200 p-4 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+                    <div class="flex items-start gap-3">
+                      <div class="mt-0.5 w-8 h-8 rounded-xl bg-blue-50 flex items-center justify-center">
+                        <iconify-icon icon="solar:microphone-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+                      </div>
+    
+                      <div>
+                        <p class="text-sm font-normal text-slate-800">
+                          Captured idea
+                        </p>
+    
+                        <p class="text-xs leading-5 text-slate-500 mt-1 font-light">
+                          “Package last week’s customer calls into a launch
+                          positioning memo.”
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+    
+                  <!-- Animated Product Card -->
+                  <div class="aura-hero-card rounded-2xl bg-white border border-slate-200 p-4 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+                    <div class="flex items-start gap-3">
+                      <div class="mt-0.5 w-8 h-8 rounded-xl bg-indigo-50 flex items-center justify-center">
+                        <iconify-icon icon="solar:checklist-minimalistic-linear" style="stroke-width: 1.5;" class="text-lg text-indigo-500"></iconify-icon>
+                      </div>
+    
+                      <div class="flex-1">
+                        <div class="flex items-center justify-between gap-3">
+                          <p class="text-sm font-normal text-slate-800">
+                            Next actions
+                          </p>
+    
+                          <span class="text-xs text-blue-500 bg-blue-50 border border-blue-100 rounded-full px-2 py-1">
+                            4 found
+                          </span>
+                        </div>
+    
+                        <div class="mt-3 space-y-2">
+                          <div class="flex items-center gap-2 text-xs text-slate-500">
+                            <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                            Send founder update by 4 PM
+                          </div>
+    
+                          <div class="flex items-center gap-2 text-xs text-slate-500">
+                            <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+                            Prepare notes for strategy review
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+    
+                  <!-- Bottom Cards -->
+                  <div class="grid sm:grid-cols-2 gap-3">
+    
+                    <!-- Focus Window / Protected Soft Slate Tile -->
+                    
+                    <div class="aura-hero-card relative overflow-hidden rounded-2xl bg-gradient-to-b from-slate-50 to-slate-200 text-slate-900 border border-blue-100 p-4 shadow-[0_12px_28px_-16px_rgba(59,130,246,0.24),inset_0_1px_0_white]">
+                    
+                    
+                    
+                      <!-- Soft active glow -->
+                    
+                      <div class="absolute -top-10 -right-10 w-24 h-24 rounded-full bg-blue-300/30 blur-2xl pointer-events-none"></div>
+                    
+                      <div class="relative flex items-start justify-between gap-3">
+                    
+                        <div>
+                    
+                          <div class="flex items-center gap-2">
+                    
+                            <span class="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_0_4px_rgba(59,130,246,0.12)]"></span>
+                    
+                            <p class="text-xs text-slate-500 font-light">
+                    
+                              Focus window
+                    
+                            </p>
+                    
+                          </div>
+                    
+                          <p class="mt-2 text-2xl font-light tracking-tight text-slate-950">
+                    
+                            10:30–12:00
+                    
+                          </p>
+                    
+                        </div>
+                    
+                        <div class="w-8 h-8 rounded-xl bg-white/80 border border-white flex items-center justify-center shadow-[inset_0_1px_0_white]">
+                    
+                          <iconify-icon icon="solar:lock-keyhole-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+                    
+                        </div>
+                    
+                      </div>
+                    
+                      <div class="relative mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/70 border border-white px-2.5 py-1 text-[10px] text-slate-500 shadow-[inset_0_1px_0_white]">
+                    
+                        <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-xs text-blue-500"></iconify-icon>
+                    
+                        Protected for deep work
+                    
+                      </div>
+                    
+                    </div>
+    
+                    <!-- Suggested Reply / Softer Blue Skeuomorphic Tile -->
+                    <div class="aura-hero-card rounded-2xl bg-gradient-to-b from-blue-400 to-blue-600 text-white border border-blue-700 p-4 shadow-[0_10px_24px_-14px_rgba(59,130,246,0.55),inset_0_1px_0_rgba(255,255,255,0.30)]">
+                      <p class="text-xs text-blue-100 font-light">
+                        Suggested reply
+                      </p>
+    
+                      <p class="mt-1 text-sm leading-5 font-light">
+                        Drafted from context, ready to edit.
+                      </p>
+                    </div>
+    
+                  </div>
+                </div>
+              </div>
+            </div>
+    
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =====================================================
+    
+         Section 02 — Problem / Why It Matters
+    
+    ====================================================== -->
+    
+    <section class="max-w-7xl mx-auto px-6 py-20">
+    
+      <div class="flex flex-col z-10 w-full relative gap-y-16">
+    
+        <!-- Section Intro -->
+    
+        <div class="max-w-3xl">
+    
+          <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+    
+            WHY IT MATTERS
+    
+          </p>
+    
+          <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05] max-w-5xl">
+            Your work does not
+            <span class="block text-slate-950">arrive neatly.</span>
+          </h2>
+    
+          <p class="mt-5 text-base md:text-lg leading-8 text-slate-600 font-light max-w-2xl">
+    
+            It arrives as notes, messages, meetings, documents, half-ideas, and forgotten follow-ups.
+    
+            AURA turns that scattered input into priorities, summaries, reminders, and next actions you can actually use.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Problem Cards -->
+    
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 lg:gap-8">
+    
+          <!-- Problem Card 01 -->
+    
+          <div class="group flex flex-col gap-4 rounded-[2rem] bg-white/62 border border-white p-6 shadow-[0_10px_28px_-20px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/82 transition-all duration-300">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-500 shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:lightbulb-bolt-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+    
+            </div>
+    
+            <div>
+    
+              <h3 class="text-lg font-normal tracking-tight text-slate-950">
+    
+                Ideas disappear
+    
+              </h3>
+    
+              <p class="mt-3 leading-7 text-sm font-light text-slate-600">
+    
+                Capture rough thoughts before they vanish between calls, commutes, and context switches.
+    
+              </p>
+    
+            </div>
+    
+          </div>
+    
+          <!-- Problem Card 02 -->
+    
+          <div class="group flex flex-col gap-4 rounded-[2rem] bg-white/62 border border-white p-6 shadow-[0_10px_28px_-20px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/82 transition-all duration-300">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-500 shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:widget-5-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+    
+            </div>
+    
+            <div>
+    
+              <h3 class="text-lg font-normal tracking-tight text-slate-950">
+    
+                Tasks scatter
+    
+              </h3>
+    
+              <p class="mt-3 leading-7 text-sm font-light text-slate-600">
+    
+                Turn notes, messages, and meeting details into clear next steps, reminders, and follow-ups.
+    
+              </p>
+    
+            </div>
+    
+          </div>
+    
+          <!-- Problem Card 03 -->
+    
+          <div class="group flex flex-col gap-4 rounded-[2rem] bg-white/62 border border-white p-6 shadow-[0_10px_28px_-20px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/82 transition-all duration-300">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-500 shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:folder-with-files-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+    
+            </div>
+    
+            <div>
+    
+              <h3 class="text-lg font-normal tracking-tight text-slate-950">
+    
+                Context piles up
+    
+              </h3>
+    
+              <p class="mt-3 leading-7 text-sm font-light text-slate-600">
+    
+                Summarize long notes, emails, documents, and links so you can understand what matters quickly.
+    
+              </p>
+    
+            </div>
+    
+          </div>
+    
+          <!-- Problem Card 04 -->
+    
+          <div class="group flex flex-col gap-4 rounded-[2rem] bg-white/62 border border-white p-6 shadow-[0_10px_28px_-20px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/82 transition-all duration-300">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-500 shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:clock-circle-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+    
+            </div>
+    
+            <div>
+    
+              <h3 class="text-lg font-normal tracking-tight text-slate-950">
+    
+                Organizing takes over
+    
+              </h3>
+    
+              <p class="mt-3 leading-7 text-sm font-light text-slate-600">
+    
+                Spend less time sorting work and more time deciding, creating, replying, and shipping.
+    
+              </p>
+    
+            </div>
+    
+          </div>
+    
+        </div>
+    
+        <!-- Transformation Block -->
+    
+        <div class="overflow-hidden min-h-[560px] lg:min-h-[620px] rounded-[2.75rem] bg-gradient-to-b from-[#172033] to-[#101827] text-white border border-white/10 relative shadow-[0_40px_90px_-45px_rgba(15,23,42,0.78),inset_0_1px_0_rgba(255,255,255,0.14)]">
+    
+          <!-- Dark Block Background Texture -->
+    
+          <div class="absolute inset-0 opacity-[0.10]" style="background-image: linear-gradient(rgba(255,255,255,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.08) 1px, transparent 1px); background-size: 40px 40px;">
+          </div>
+    
+          <div class="absolute top-[-30%] right-[-10%] w-[32rem] h-[32rem] rounded-full bg-blue-400/18 blur-[6rem]"></div>
+    
+          <div class="absolute bottom-[-25%] left-[-12%] w-[28rem] h-[28rem] rounded-full bg-sky-300/10 blur-[5rem]"></div>
+    
+          <div class="absolute top-[20%] left-[42%] w-[18rem] h-[18rem] rounded-full bg-white/5 blur-[4rem]"></div>
+    
+          <div class="relative grid grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] min-h-[560px] lg:min-h-[620px] h-full">
+    
+            <!-- Transformation Copy -->
+    
+            <div class="flex flex-col justify-center p-8 md:p-12 lg:p-16">
+    
+              <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-300 mb-4">
+    
+                THE TRANSFORMATION
+    
+              </p>
+    
+              <h2 class="md:text-4xl lg:text-5xl leading-tight text-3xl font-light text-white tracking-tight mb-6">
+    
+                From mental clutter to a clear daily operating system.
+    
+              </h2>
+    
+              <p class="text-base leading-8 text-slate-300 font-light max-w-xl">
+    
+                AURA reads the signals across your day, connects what matters, and turns scattered input into priorities,
+    
+                summaries, follow-ups, and next actions.
+    
+              </p>
+    
+              <div class="mt-10 flex flex-col sm:flex-row gap-3">
+    
+                <a href="#workflow" class="group flex items-center justify-center gap-3 bg-white hover:bg-slate-100 transition-all text-slate-900 text-sm font-normal rounded-full px-6 py-3 w-fit shadow-[inset_0_1px_0_white] hover:-translate-y-0.5">
+    
+                  <span>Explore Workflow</span>
+    
+                  <iconify-icon icon="solar:arrow-right-linear" style="stroke-width: 1.5;" class="text-lg group-hover:translate-x-1 transition-transform"></iconify-icon>
+    
+                </a>
+    
+                <a href="#pricing" class="group flex items-center justify-center gap-3 bg-white/[0.07] hover:bg-white/[0.1] transition-all text-white text-sm font-normal rounded-full px-6 py-3 w-fit border border-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+    
+                  <span>Try AURA Free</span>
+    
+                </a>
+    
+              </div>
+    
+              <div class="mt-12 pt-8 border-t border-white/10">
+    
+                <p class="text-xs text-white/50 uppercase tracking-widest mb-4 font-['JetBrains_Mono',monospace]">
+    
+                  Built for focused work
+    
+                </p>
+    
+                <div class="flex flex-wrap items-center gap-3 text-xs text-white/60">
+    
+                  <span class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+    
+                    Founders
+    
+                  </span>
+    
+                  <span class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+    
+                    Executives
+    
+                  </span>
+    
+                  <span class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+    
+                    Creators
+    
+                  </span>
+    
+                  <span class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+    
+                    Consultants
+    
+                  </span>
+    
+                </div>
+    
+              </div>
+    
+            </div>
+    
+            <!-- Input-to-Action Pipeline Visual -->
+    
+            <div class="relative flex items-center justify-center p-6 md:p-10 lg:pr-14">
+    
+              <!-- Pipeline Shell -->
+    
+              <div class="relative w-full max-w-2xl rounded-[2.25rem] bg-white/[0.065] border border-white/10 p-4 md:p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_30px_70px_-40px_rgba(0,0,0,0.72)] backdrop-blur-sm">
+    
+                <!-- Inner Light Panel -->
+    
+                <div class="rounded-[1.85rem] bg-gradient-to-b from-white to-slate-100 text-slate-900 border border-white/80 overflow-hidden shadow-[0_18px_50px_-30px_rgba(0,0,0,0.55),inset_0_1px_0_white]">
+    
+                  <!-- Panel Top Bar -->
+    
+                  <div class="px-5 py-4 flex items-center justify-between border-b border-slate-200/80">
+    
+                    <div class="flex items-center gap-2">
+    
+                      <span class="w-2.5 h-2.5 rounded-full bg-red-300"></span>
+    
+                      <span class="w-2.5 h-2.5 rounded-full bg-amber-300"></span>
+    
+                      <span class="w-2.5 h-2.5 rounded-full bg-emerald-300"></span>
+    
+                    </div>
+    
+                    <div class="font-['JetBrains_Mono',monospace] text-xs text-slate-400 tracking-[-0.05em]">
+    
+                      INPUT → ACTION
+    
+                    </div>
+    
+                  </div>
+    
+                  <!-- Pipeline Content -->
+    
+                  <div class="p-5 md:p-6">
+    
+                    <!-- Pipeline Header -->
+    
+                    <div class="flex items-start justify-between gap-4 mb-6">
+    
+                      <div>
+    
+                        <p class="text-xs text-slate-400 font-light mb-1">
+    
+                          AURA has organized your workspace
+    
+                        </p>
+    
+                        <h3 class="text-2xl md:text-3xl font-normal tracking-tight text-slate-950">
+    
+                          Everything became actionable.
+    
+                        </h3>
+    
+                      </div>
+    
+                      <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 shadow-[inset_0_1px_0_white]">
+    
+                        <iconify-icon icon="solar:stars-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+    
+                      </div>
+    
+                    </div>
+    
+                    <!-- Pipeline Grid -->
+    
+                    <div class="grid md:grid-cols-[1fr_auto_1fr] gap-4 md:gap-5 items-stretch">
+    
+                      <!-- Inputs Column -->
+    
+                      <div class="rounded-[1.5rem] bg-slate-50 border border-slate-200 p-4 shadow-[inset_0_1px_0_white]">
+    
+                        <p class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-400 uppercase tracking-widest mb-4">
+    
+                          Scattered inputs
+    
+                        </p>
+    
+                        <div class="space-y-3">
+    
+                          <!-- Input 01 -->
+    
+                          <div class="flex items-center gap-3 rounded-2xl bg-white border border-slate-200 px-3 py-3 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+    
+                            <div class="w-8 h-8 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+    
+                              <iconify-icon icon="solar:microphone-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+    
+                            </div>
+    
+                            <div>
+    
+                              <p class="text-xs font-normal text-slate-900">
+    
+                                Voice note
+    
+                              </p>
+    
+                              <p class="text-[11px] text-slate-400 font-light">
+    
+                                Rough idea captured
+    
+                              </p>
+    
+                            </div>
+    
+                          </div>
+    
+                          <!-- Input 02 -->
+    
+                          <div class="flex items-center gap-3 rounded-2xl bg-white border border-slate-200 px-3 py-3 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+    
+                            <div class="w-8 h-8 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+    
+                              <iconify-icon icon="solar:letter-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+    
+                            </div>
+    
+                            <div>
+    
+                              <p class="text-xs font-normal text-slate-900">
+    
+                                Messages
+    
+                              </p>
+    
+                              <p class="text-[11px] text-slate-400 font-light">
+    
+                                Follow-ups buried
+    
+                              </p>
+    
+                            </div>
+    
+                          </div>
+    
+                          <!-- Input 03 -->
+    
+                          <div class="flex items-center gap-3 rounded-2xl bg-white border border-slate-200 px-3 py-3 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+    
+                            <div class="w-8 h-8 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+    
+                              <iconify-icon icon="solar:document-text-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+    
+                            </div>
+    
+                            <div>
+    
+                              <p class="text-xs font-normal text-slate-900">
+    
+                                Documents
+    
+                              </p>
+    
+                              <p class="text-[11px] text-slate-400 font-light">
+    
+                                Too much context
+    
+                              </p>
+    
+                            </div>
+    
+                          </div>
+    
+                          <!-- Input 04 -->
+    
+                          <div class="flex items-center gap-3 rounded-2xl bg-white border border-slate-200 px-3 py-3 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+    
+                            <div class="w-8 h-8 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center">
+    
+                              <iconify-icon icon="solar:calendar-mark-linear" style="stroke-width: 1.5;" class="text-base text-slate-600"></iconify-icon>
+    
+                            </div>
+    
+                            <div>
+    
+                              <p class="text-xs font-normal text-slate-900">
+    
+                                Meetings
+    
+                              </p>
+    
+                              <p class="text-[11px] text-slate-400 font-light">
+    
+                                Decisions scattered
+    
+                              </p>
+    
+                            </div>
+    
+                          </div>
+    
+                        </div>
+    
+                      </div>
+    
+                      <!-- Connector Column -->
+    
+                      <div class="hidden md:flex flex-col items-center justify-center gap-3">
+    
+                        <div class="h-16 w-px bg-gradient-to-b from-transparent via-slate-300 to-transparent"></div>
+    
+                        <div class="w-12 h-12 rounded-2xl bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 flex items-center justify-center text-white shadow-[0_10px_24px_rgba(59,130,246,0.28),inset_0_1px_0_rgba(255,255,255,0.35)]">
+    
+                          <iconify-icon icon="solar:alt-arrow-right-linear" style="stroke-width: 1.5;" class="text-2xl"></iconify-icon>
+    
+                        </div>
+    
+                        <div class="h-16 w-px bg-gradient-to-b from-transparent via-slate-300 to-transparent"></div>
+    
+                      </div>
+    
+                      <!-- Outputs Column -->
+    
+                      <div class="rounded-[1.5rem] bg-gradient-to-b from-[#172033] to-[#101827] text-white border border-white/10 p-4 shadow-[0_12px_30px_-20px_rgba(15,23,42,0.65),inset_0_1px_0_rgba(255,255,255,0.1)]">
+    
+                        <p class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-300 uppercase tracking-widest mb-4">
+    
+                          Clear action
+    
+                        </p>
+    
+                        <div class="space-y-3">
+    
+                          <div class="rounded-2xl bg-white/8 border border-white/10 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+    
+                            <div class="flex items-center justify-between gap-3">
+    
+                              <div class="flex items-center gap-3">
+    
+                                <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+    
+                                <p class="text-xs font-normal text-white">
+    
+                                  Priorities ranked
+    
+                                </p>
+    
+                              </div>
+    
+                              <span class="text-[10px] text-blue-200 bg-blue-400/10 border border-blue-300/10 rounded-full px-2 py-1">
+    
+                                3
+    
+                              </span>
+    
+                            </div>
+    
+                          </div>
+    
+                          <div class="rounded-2xl bg-white/8 border border-white/10 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+    
+                            <div class="flex items-center justify-between gap-3">
+    
+                              <div class="flex items-center gap-3">
+    
+                                <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+    
+                                <p class="text-xs font-normal text-white">
+    
+                                  Follow-ups found
+    
+                                </p>
+    
+                              </div>
+    
+                              <span class="text-[10px] text-blue-200 bg-blue-400/10 border border-blue-300/10 rounded-full px-2 py-1">
+    
+                                5
+    
+                              </span>
+    
+                            </div>
+    
+                          </div>
+    
+                          <div class="rounded-2xl bg-white/8 border border-white/10 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+    
+                            <div class="flex items-center justify-between gap-3">
+    
+                              <div class="flex items-center gap-3">
+    
+                                <span class="w-2 h-2 rounded-full bg-blue-400"></span>
+    
+                                <p class="text-xs font-normal text-white">
+    
+                                  Summaries ready
+    
+                                </p>
+    
+                              </div>
+    
+                              <span class="text-[10px] text-blue-200 bg-blue-400/10 border border-blue-300/10 rounded-full px-2 py-1">
+    
+                                4
+    
+                              </span>
+    
+                            </div>
+    
+                          </div>
+    
+                          <div class="rounded-2xl bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 px-3 py-3 shadow-[0_10px_22px_-14px_rgba(59,130,246,0.7),inset_0_1px_0_rgba(255,255,255,0.25)]">
+    
+                            <div class="flex items-center gap-3">
+    
+                              <iconify-icon icon="solar:checklist-minimalistic-linear" style="stroke-width: 1.5;" class="text-lg text-white"></iconify-icon>
+    
+                              <div>
+    
+                                <p class="text-xs font-normal text-white">
+    
+                                  Daily brief generated
+    
+                                </p>
+    
+                                <p class="text-[11px] text-blue-100 font-light mt-0.5">
+    
+                                  Ready before your first meeting
+    
+                                </p>
+    
+                              </div>
+    
+                            </div>
+    
+                          </div>
+    
+                        </div>
+    
+                      </div>
+    
+                    </div>
+    
+                    <!-- Bottom Summary Bar -->
+    
+                    <div class="mt-4 rounded-2xl bg-white border border-slate-200 px-4 py-3 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+    
+                      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+    
+                        <div class="flex items-center gap-3">
+    
+                          <div class="w-8 h-8 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+    
+                            <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+    
+                          </div>
+    
+                          <div>
+    
+                            <p class="text-xs font-normal text-slate-900">
+    
+                              Private memory used
+    
+                            </p>
+    
+                            <p class="text-[11px] text-slate-400 font-light">
+    
+                              Only the context you control
+    
+                            </p>
+    
+                          </div>
+    
+                        </div>
+    
+                        <div class="flex items-center gap-2 text-[11px] text-slate-400">
+    
+                          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+    
+                          9 actions organized
+    
+                        </div>
+    
+                      </div>
+    
+                    </div>
+    
+                  </div>
+    
+                </div>
+    
+                <!-- Floating Mini Status Card -->
+    
+                <div class="hidden md:block absolute -right-3 top-16 rounded-2xl bg-white/90 backdrop-blur border border-white px-4 py-3 shadow-[0_18px_38px_-20px_rgba(15,23,42,0.45),inset_0_1px_0_white]">
+    
+                  <div class="flex items-center gap-3">
+    
+                    <div class="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
+    
+                      <iconify-icon icon="solar:bolt-circle-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+    
+                    </div>
+    
+                    <div>
+    
+                      <p class="text-xs text-slate-900 font-normal">
+    
+                        Signal detected
+    
+                      </p>
+    
+                      <p class="text-xs text-slate-400 font-light">
+    
+                        Follow-up hidden in email
+    
+                      </p>
+    
+                    </div>
+    
+                  </div>
+    
+                </div>
+    
+                <!-- Floating Mini Status Card -->
+    
+                <div class="hidden md:block absolute -left-6 -bottom-4 rounded-2xl bg-white/90 backdrop-blur border border-white px-4 py-3 shadow-[0_18px_38px_-20px_rgba(15,23,42,0.45),inset_0_1px_0_white]">
+    
+                  <div class="flex items-center gap-3">
+    
+                    <div class="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
+    
+                      <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+    
+                    </div>
+    
+                    <div>
+    
+                      <p class="text-xs text-slate-900 font-normal">
+    
+                        Clarity created
+    
+                      </p>
+    
+                      <p class="text-xs text-slate-400 font-light">
+    
+                        Priorities, replies, tasks
+    
+                      </p>
+    
+                    </div>
+    
+                  </div>
+    
+                </div>
+    
+              </div>
+    
+            </div>
+    
+            <!-- End Pipeline Visual -->
+    
+          </div>
+    
+        </div>
+    
+      </div>
+    
+    </section>
+
+    <!-- =====================================================
+    
+         Section 03 — Core Features / Daily Assistant Loop
+    
+    ====================================================== -->
+    
+    <section id="features" class="max-w-7xl mx-auto px-6 py-20">
+    
+      <!-- Section Intro -->
+    
+      <div class="text-center max-w-5xl mx-auto mb-14">
+    
+        <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+    
+          CORE CAPABILITIES
+    
+        </p>
+    
+        <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05] max-w-5xl mx-auto">
+    
+          AURA turns your day
+    
+          <span class="block">into an organized loop.</span>
+    
+        </h2>
+    
+        <p class="mt-6 text-base md:text-lg leading-8 text-slate-600 font-light max-w-3xl mx-auto">
+    
+          Capture what happens, understand what matters, and move forward with clear priorities,
+    
+          reminders, summaries, and next actions.
+    
+        </p>
+    
+      </div>
+    
+      <!-- Capability Grid -->
+    
+      <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+    
+        <!-- Capability 01 -->
+    
+        <div class="rounded-[2rem] bg-white/68 border border-white p-6 shadow-[0_10px_28px_-18px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/84 transition-all duration-300">
+    
+          <div class="flex items-center justify-between gap-4">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:sun-2-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+    
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-500 bg-blue-50 border border-blue-100 rounded-full px-2.5 py-1">
+    
+              3 priorities ready
+    
+            </span>
+    
+          </div>
+    
+          <h3 class="mt-6 text-xl font-normal tracking-tight text-slate-950">
+    
+            Morning Brief
+    
+          </h3>
+    
+          <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+    
+            Start with priorities, schedule context, unresolved follow-ups, and the decisions waiting for you.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Capability 02 -->
+    
+        <div class="rounded-[2rem] bg-white/68 border border-white p-6 shadow-[0_10px_28px_-18px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/84 transition-all duration-300">
+    
+          <div class="flex items-center justify-between gap-4">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:microphone-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+    
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-500 bg-white border border-slate-200 rounded-full px-2.5 py-1 shadow-[inset_0_1px_0_white]">
+    
+              Voice note saved
+    
+            </span>
+    
+          </div>
+    
+          <h3 class="mt-6 text-xl font-normal tracking-tight text-slate-950">
+    
+            Capture in Motion
+    
+          </h3>
+    
+          <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+    
+            Save ideas, voice notes, links, documents, and messages without breaking focus.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Capability 03 -->
+    
+        <div class="rounded-[2rem] bg-white/68 border border-white p-6 shadow-[0_10px_28px_-18px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/84 transition-all duration-300">
+    
+          <div class="flex items-center justify-between gap-4">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:case-round-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+    
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-500 bg-blue-50 border border-blue-100 rounded-full px-2.5 py-1">
+    
+              Context prepared
+    
+            </span>
+    
+          </div>
+    
+          <h3 class="mt-6 text-xl font-normal tracking-tight text-slate-950">
+    
+            Meeting Prep
+    
+          </h3>
+    
+          <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+    
+            Walk into conversations with summaries, previous context, and reminders already prepared.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Capability 04 -->
+    
+        <div class="rounded-[2rem] bg-white/68 border border-white p-6 shadow-[0_10px_28px_-18px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/84 transition-all duration-300">
+    
+          <div class="flex items-center justify-between gap-4">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:checklist-minimalistic-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+    
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-500 bg-blue-50 border border-blue-100 rounded-full px-2.5 py-1">
+    
+              5 actions found
+    
+            </span>
+    
+          </div>
+    
+          <h3 class="mt-6 text-xl font-normal tracking-tight text-slate-950">
+    
+            Action Recovery
+    
+          </h3>
+    
+          <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+    
+            Turn messy notes and conversations into tasks, owners, due dates, and suggested next steps.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Capability 05 -->
+    
+        <div class="rounded-[2rem] bg-white/68 border border-white p-6 shadow-[0_10px_28px_-18px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/84 transition-all duration-300">
+    
+          <div class="flex items-center justify-between gap-4">
+    
+            <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:chat-round-dots-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+    
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-500 bg-blue-50 border border-blue-100 rounded-full px-2.5 py-1">
+    
+              Reply ready
+    
+            </span>
+    
+          </div>
+    
+          <h3 class="mt-6 text-xl font-normal tracking-tight text-slate-950">
+    
+            Suggested Replies
+    
+          </h3>
+    
+          <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+    
+            Draft thoughtful replies and updates from the context AURA already understands.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Capability 06 -->
+    
+        <div class="rounded-[2rem] bg-white/68 border border-white p-6 shadow-[0_10px_28px_-18px_rgba(15,23,42,0.24),inset_0_1px_0_white] hover:-translate-y-1 hover:bg-white/84 transition-all duration-300">
+    
+          <div class="flex items-center justify-between gap-4">
+    
+            <div class="w-11 h-11 rounded-2xl bg-slate-100 border border-slate-200 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+    
+              <iconify-icon icon="solar:database-linear" style="stroke-width: 1.5;" class="text-2xl text-slate-600"></iconify-icon>
+    
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-500 bg-white border border-slate-200 rounded-full px-2.5 py-1 shadow-[inset_0_1px_0_white]">
+    
+              Memory updated
+    
+            </span>
+    
+          </div>
+    
+          <h3 class="mt-6 text-xl font-normal tracking-tight text-slate-950">
+    
+            Private Memory
+    
+          </h3>
+    
+          <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+    
+            Carry useful context forward without rebuilding your workspace every morning.
+    
+          </p>
+    
+        </div>
+    
+        <!-- Capability 07 / Wide Card -->
+    
+        <div class="md:col-span-2 lg:col-span-3 rounded-[2.25rem] bg-gradient-to-b from-[#1d2a3d] to-[#131c2b] text-white border border-white/10 p-6 md:p-8 shadow-[0_28px_70px_-35px_rgba(15,23,42,0.72),inset_0_1px_0_rgba(255,255,255,0.13)] overflow-hidden relative">
+    
+          <!-- Background glow -->
+    
+          <div class="absolute top-[-40%] right-[-10%] w-[24rem] h-[24rem] rounded-full bg-blue-400/18 blur-[5rem]"></div>
+    
+          <div class="absolute bottom-[-45%] left-[-12%] w-[22rem] h-[22rem] rounded-full bg-sky-300/10 blur-[5rem]"></div>
+    
+          <div class="absolute inset-0 opacity-[0.09]" style="background-image: linear-gradient(rgba(255,255,255,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.08) 1px, transparent 1px); background-size: 36px 36px;">
+          </div>
+    
+          <div class="relative grid lg:grid-cols-[0.85fr_1.15fr] gap-8 items-center">
+    
+            <!-- Wide Card Copy -->
+    
+            <div>
+    
+              <div class="inline-flex items-center gap-2 rounded-full bg-white/8 border border-white/10 px-3 py-1.5 mb-6">
+    
+                <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
+    
+                <span class="font-['JetBrains_Mono',monospace] text-[10px] tracking-[-0.03em] text-blue-200">
+    
+                  TOMORROW ORGANIZED
+    
+                </span>
+    
+              </div>
+    
+              <h3 class="text-3xl md:text-4xl font-normal tracking-tight text-white leading-tight">
+    
+                End-of-Day Wrap
+    
+              </h3>
+    
+              <p class="mt-4 text-sm md:text-base leading-7 text-slate-300 font-light max-w-xl">
+    
+                Review what moved, what stalled, what needs attention tomorrow, and what AURA should remember.
+    
+              </p>
+    
+            </div>
+    
+            <!-- Mini End-of-Day UI -->
+    
+            <div class="rounded-[1.75rem] bg-white text-slate-900 border border-white/80 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.62),inset_0_1px_0_white]">
+    
+              <div class="flex items-center justify-between border-b border-slate-200 pb-4 mb-4">
+    
+                <div>
+    
+                  <p class="text-xs text-slate-400 font-light">
+    
+                    Today’s wrap
+    
+                  </p>
+    
+                  <p class="mt-1 text-xl font-normal tracking-tight text-slate-950">
+    
+                    Ready for tomorrow.
+    
+                  </p>
+    
+                </div>
+    
+                <div class="w-10 h-10 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+    
+                  <iconify-icon icon="solar:moon-stars-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+    
+                </div>
+    
+              </div>
+    
+              <div class="grid sm:grid-cols-3 gap-3">
+    
+                <div class="rounded-2xl bg-slate-50 border border-slate-200 p-4 shadow-[inset_0_1px_0_white]">
+    
+                  <p class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-400 uppercase tracking-widest">
+    
+                    Moved
+    
+                  </p>
+    
+                  <p class="mt-2 text-2xl font-light tracking-tight text-slate-950">
+    
+                    7
+    
+                  </p>
+    
+                  <p class="mt-1 text-xs text-slate-500 font-light">
+    
+                    actions completed
+    
+                  </p>
+    
+                </div>
+    
+                <div class="rounded-2xl bg-blue-50 text-slate-900 border border-blue-100 p-4 shadow-[inset_0_1px_0_white]">
+    
+                  <p class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-500 uppercase tracking-widest">
+    
+                    Carry
+    
+                  </p>
+    
+                  <p class="mt-2 text-2xl font-light tracking-tight text-slate-950">
+    
+                    3
+    
+                  </p>
+    
+                  <p class="mt-1 text-xs text-slate-500 font-light">
+    
+                    priorities tomorrow
+    
+                  </p>
+    
+                </div>
+    
+                <div class="rounded-2xl bg-gradient-to-b from-blue-400 to-blue-600 text-white border border-blue-700 p-4 shadow-[0_12px_28px_-18px_rgba(59,130,246,0.7),inset_0_1px_0_rgba(255,255,255,0.25)]">
+    
+                  <p class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-100 uppercase tracking-widest">
+    
+                    Memory
+    
+                  </p>
+    
+                  <p class="mt-2 text-2xl font-light tracking-tight text-white">
+    
+                    5
+    
+                  </p>
+    
+                  <p class="mt-1 text-xs text-blue-100 font-light">
+    
+                    updates saved
+    
+                  </p>
+    
+                </div>
+    
+              </div>
+    
+            </div>
+    
+          </div>
+    
+        </div>
+    
+      </div>
+    
+    </section>
+
+<!-- =====================================================
+
+     Section 04 — How It Works / Simple Steps Timeline
+
+====================================================== -->
+
+<section id="workflow" class="max-w-7xl mx-auto px-6 py-20">
+
+  <!-- Section Intro -->
+
+  <div class="text-center max-w-5xl mx-auto mb-16">
+
+    <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+
+      HOW IT WORKS
+
+    </p>
+
+    <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05] max-w-5xl mx-auto">
+
+      Four steps from scattered
+
+      <span class="block">to organized.</span>
+
+    </h2>
+
+    <p class="mt-6 max-w-3xl mx-auto text-base md:text-lg leading-8 text-slate-600 font-light">
+
+      Capture what happens, let AURA organize the context, then start with priorities,
+
+      summaries, reminders, and next actions already prepared.
+
+    </p>
+
+  </div>
+
+  <!-- Timeline Shell -->
+
+  <div class="relative overflow-hidden rounded-[2.75rem] bg-white/55 backdrop-blur-xl border border-white shadow-[0_30px_80px_-45px_rgba(15,23,42,0.35),inset_0_1px_0_rgba(255,255,255,1)] px-6 md:px-10 pt-16 pb-12">
+
+    <!-- Soft background glows -->
+
+    <div class="absolute top-[-35%] left-[10%] w-[32rem] h-[32rem] rounded-full bg-blue-200/35 blur-[6rem] pointer-events-none"></div>
+
+    <div class="absolute bottom-[-35%] right-[5%] w-[30rem] h-[30rem] rounded-full bg-sky-200/22 blur-[6rem] pointer-events-none"></div>
+
+    <!-- Subtle grid texture -->
+
+    <div class="absolute inset-0 opacity-[0.16] pointer-events-none" style="background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 2rem 2rem;"></div>
+
+    <!-- Timeline Area -->
+
+    <div class="relative">
+
+      <!-- Animated Connection Line -->
+
+      <div class="hidden lg:block absolute left-0 right-0 top-[3.05rem] h-px">
+
+        <div class="absolute inset-x-12 top-0 border-t border-dashed border-blue-300/60"></div>
+
+        <div class="absolute top-[-1px] left-12 h-[2px] w-52 bg-gradient-to-r from-transparent via-blue-500/70 to-transparent rounded-full animate-[auraConnectionFlow_4.5s_linear_infinite]"></div>
+
+      </div>
+
+      <!-- Premium Light Glow Behind Steps -->
+
+      <div class="hidden lg:block pointer-events-none absolute top-4 left-1/2 h-20 w-full max-w-5xl -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-blue-300/35 to-transparent blur-2xl"></div>
+
+      <div class="hidden lg:block pointer-events-none absolute top-7 left-1/2 h-10 w-3/4 -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-sky-200/45 to-transparent blur-xl"></div>
+
+      <!-- Steps Grid -->
+
+      <div class="relative grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 lg:gap-8">
+
+        <!-- Step 01 -->
+
+        <div class="group relative flex flex-col items-center text-center">
+
+          <!-- Number Circle -->
+
+          <div class="h-24 w-full relative flex items-center justify-center">
+
+            <span class="relative inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-b from-white to-slate-100 border border-white shadow-[0_16px_34px_-20px_rgba(15,23,42,0.55),inset_0_1px_0_white]">
+
+              <span class="absolute inset-1 rounded-full bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_10px_22px_rgba(59,130,246,0.28)]"></span>
+
+              <span class="relative font-['JetBrains_Mono',monospace] text-sm font-semibold text-white">
+
+                01
+
+              </span>
+
+            </span>
+
+          </div>
+
+          <!-- Card -->
+
+          <div class="mt-4 rounded-[2rem] bg-white/70 border border-white p-6 min-h-[15rem] shadow-[0_16px_36px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] group-hover:-translate-y-1 group-hover:bg-white/85 transition-all duration-300">
+
+            <div class="w-11 h-11 mx-auto rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+
+              <iconify-icon icon="solar:inbox-in-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+            </div>
+
+            <h3 class="text-xl font-normal tracking-tight text-slate-950">
+
+              Capture
+
+            </h3>
+
+            <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+              Drop in voice notes, links, documents, meeting fragments, messages,
+
+              and rough ideas before they disappear.
+
+            </p>
+
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-[11px] text-blue-600">
+
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+
+              Input saved instantly
+
+            </div>
+
+          </div>
+
+        </div>
+
+        <!-- Step 02 -->
+
+        <div class="group relative flex flex-col items-center text-center">
+
+          <!-- Number Circle -->
+
+          <div class="h-24 w-full relative flex items-center justify-center">
+
+            <span class="relative inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-b from-white to-slate-100 border border-white shadow-[0_16px_34px_-20px_rgba(15,23,42,0.55),inset_0_1px_0_white]">
+
+              <span class="absolute inset-1 rounded-full bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_10px_22px_rgba(59,130,246,0.28)]"></span>
+
+              <span class="relative font-['JetBrains_Mono',monospace] text-sm font-semibold text-white">
+
+                02
+
+              </span>
+
+            </span>
+
+          </div>
+
+          <!-- Card -->
+
+          <div class="mt-4 rounded-[2rem] bg-white/70 border border-white p-6 min-h-[15rem] shadow-[0_16px_36px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] group-hover:-translate-y-1 group-hover:bg-white/85 transition-all duration-300">
+
+            <div class="w-11 h-11 mx-auto rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+
+              <iconify-icon icon="solar:document-text-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+            </div>
+
+            <h3 class="text-xl font-normal tracking-tight text-slate-950">
+
+              Understand
+
+            </h3>
+
+            <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+              AURA summarizes long notes, extracts useful details, connects
+
+              related context, and identifies what matters.
+
+            </p>
+
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-[11px] text-blue-600">
+
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+
+              Context organized
+
+            </div>
+
+          </div>
+
+        </div>
+
+        <!-- Step 03 -->
+
+        <div class="group relative flex flex-col items-center text-center">
+
+          <!-- Number Circle -->
+
+          <div class="h-24 w-full relative flex items-center justify-center">
+
+            <span class="relative inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-b from-white to-slate-100 border border-white shadow-[0_16px_34px_-20px_rgba(15,23,42,0.55),inset_0_1px_0_white]">
+
+              <span class="absolute inset-1 rounded-full bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_10px_22px_rgba(59,130,246,0.28)]"></span>
+
+              <span class="relative font-['JetBrains_Mono',monospace] text-sm font-semibold text-white">
+
+                03
+
+              </span>
+
+            </span>
+
+          </div>
+
+          <!-- Card -->
+
+          <div class="mt-4 rounded-[2rem] bg-white/70 border border-white p-6 min-h-[15rem] shadow-[0_16px_36px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] group-hover:-translate-y-1 group-hover:bg-white/85 transition-all duration-300">
+
+            <div class="w-11 h-11 mx-auto rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+
+              <iconify-icon icon="solar:target-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+            </div>
+
+            <h3 class="text-xl font-normal tracking-tight text-slate-950">
+
+              Prioritize
+
+            </h3>
+
+            <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+              Your tasks, follow-ups, decisions, and focus windows are ranked so
+
+              you know what needs attention first.
+
+            </p>
+
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-[11px] text-blue-600">
+
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+
+              3 priorities ready
+
+            </div>
+
+          </div>
+
+        </div>
+
+        <!-- Step 04 -->
+
+        <div class="group relative flex flex-col items-center text-center">
+
+          <!-- Number Circle -->
+
+          <div class="h-24 w-full relative flex items-center justify-center">
+
+            <span class="relative inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-b from-white to-slate-100 border border-white shadow-[0_16px_34px_-20px_rgba(15,23,42,0.55),inset_0_1px_0_white]">
+
+              <span class="absolute inset-1 rounded-full bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_10px_22px_rgba(59,130,246,0.28)]"></span>
+
+              <span class="relative font-['JetBrains_Mono',monospace] text-sm font-semibold text-white">
+
+                04
+
+              </span>
+
+            </span>
+
+          </div>
+
+          <!-- Card -->
+
+          <div class="mt-4 rounded-[2rem] bg-white/70 border border-white p-6 min-h-[15rem] shadow-[0_16px_36px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] group-hover:-translate-y-1 group-hover:bg-white/85 transition-all duration-300">
+
+            <div class="w-11 h-11 mx-auto rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+
+              <iconify-icon icon="solar:checklist-minimalistic-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+            </div>
+
+            <h3 class="text-xl font-normal tracking-tight text-slate-950">
+
+              Act
+
+            </h3>
+
+            <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+              Start with a clear daily brief, suggested replies, reminders,
+
+              summaries, and next actions already prepared.
+
+            </p>
+
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-[11px] text-blue-600">
+
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+
+              Daily brief generated
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- CTA -->
+
+    <div class="relative mt-12 flex flex-col sm:flex-row justify-center items-center gap-3">
+
+      <a href="#features" class="inline-flex items-center justify-center gap-2 rounded-full px-6 py-3.5 bg-gradient-to-b from-white to-slate-50 border border-slate-200 text-slate-700 text-sm font-normal shadow-[0_6px_16px_rgba(15,23,42,0.06),inset_0_1px_0_white] hover:from-slate-50 hover:to-slate-100 hover:-translate-y-0.5 transition-all duration-300">
+
+        Explore Capabilities
+
+      </a>
+
+      <a href="#pricing" class="inline-flex items-center justify-center gap-2 rounded-full px-6 py-3.5 bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 text-white text-sm font-normal shadow-[0_10px_24px_rgba(59,130,246,0.26),inset_0_1px_0_rgba(255,255,255,0.35)] hover:from-blue-400 hover:to-blue-500 hover:-translate-y-0.5 transition-all duration-300">
+
+        Try AURA Free
+
+        <iconify-icon icon="solar:arrow-right-linear" style="stroke-width: 1.5;" class="text-lg"></iconify-icon>
+
+      </a>
+
+    </div>
+
+  </div>
+
+  <style>
+
+    @keyframes auraConnectionFlow {
+
+      0% {
+
+        transform: translateX(-14rem);
+
+        opacity: 0;
+
+      }
+
+      12% {
+
+        opacity: 1;
+
+      }
+
+      88% {
+
+        opacity: 1;
+
+      }
+
+      100% {
+
+        transform: translateX(calc(100vw + 14rem));
+
+        opacity: 0;
+
+      }
+
+    }
+
+  </style>
+
+</section>
+
+<!-- =====================================================
+
+     Section 05 — Built For / Use Cases
+
+====================================================== -->
+
+<section id="built-for" class="max-w-7xl mx-auto px-6 py-20">
+
+  <!-- Section Header -->
+
+  <div class="text-center max-w-5xl mx-auto mb-14">
+
+    <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+
+      BUILT FOR
+
+    </p>
+
+    <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05] max-w-5xl mx-auto">
+
+      Built for people
+
+      <span class="block">with too much context.</span>
+
+    </h2>
+
+    <p class="mt-6 text-base md:text-lg leading-8 text-slate-600 font-light max-w-3xl mx-auto">
+
+      AURA is designed for busy minds: people who move between meetings,
+
+      messages, ideas, documents, and decisions all day.
+
+    </p>
+
+    <div class="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
+
+      <a href="#pricing" class="inline-flex items-center gap-2 justify-center rounded-full px-6 py-3.5 text-sm font-normal text-white bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 shadow-[0_10px_24px_rgba(59,130,246,0.26),inset_0_1px_0_rgba(255,255,255,0.35)] hover:from-blue-400 hover:to-blue-500 hover:-translate-y-0.5 transition-all duration-300">
+
+        Try AURA Free
+
+        <iconify-icon icon="solar:arrow-right-linear" style="stroke-width: 1.5;" class="text-lg"></iconify-icon>
+
+      </a>
+
+      <a href="#workflow" class="inline-flex items-center justify-center rounded-full px-6 py-3.5 text-sm font-normal text-slate-700 bg-gradient-to-b from-white to-slate-50 border border-slate-200 shadow-[0_6px_16px_rgba(15,23,42,0.06),inset_0_1px_0_white] hover:from-slate-50 hover:to-slate-100 hover:-translate-y-0.5 transition-all duration-300">
+
+        Explore Workflow
+
+      </a>
+
+    </div>
+
+  </div>
+
+  <!-- Use Case Cards -->
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-8">
+
+    <!-- Card 01 — Founders -->
+    <article class="group bg-white/70 rounded-[2rem] border border-white shadow-[0_18px_44px_-28px_rgba(15,23,42,0.34),inset_0_1px_0_white] overflow-hidden hover:-translate-y-1 hover:bg-white/88 transition-all duration-300">
+    
+      <!-- Visual Panel -->
+      <div class="relative isolate mx-4 mt-4 rounded-[1.5rem] overflow-hidden bg-gradient-to-b from-white to-slate-100 border border-white shadow-[0_18px_42px_-30px_rgba(15,23,42,0.28),inset_0_1px_0_white] min-h-[13rem] [clip-path:inset(0_round_1.5rem)]">
+    
+        <!-- Texture + Glow -->
+        <div class="absolute inset-0 z-0 opacity-[0.16]" style="background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 1.5rem 1.5rem;">
+        </div>
+        <div class="absolute top-[-35%] right-[-20%] z-0 w-[14rem] h-[14rem] rounded-full bg-blue-200/55 blur-[4rem] pointer-events-none">
+        </div>
+    
+        <!-- Mini UI -->
+        <div class="relative z-10 p-5">
+          <div class="flex items-center justify-between mb-5">
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-red-300"></span>
+              <span class="w-2.5 h-2.5 rounded-full bg-amber-300"></span>
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-300"></span>
+            </div>
+    
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-400">
+              FOUNDER MODE
+            </span>
+          </div>
+    
+          <div class="rounded-2xl bg-white text-slate-900 border border-slate-200 p-4 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+            <p class="text-xs text-slate-400 font-light">
+              Morning priorities
+            </p>
+    
+            <p class="mt-1 text-xl font-normal tracking-tight text-slate-950">
+              Investor update ready.
+            </p>
+    
+            <div class="mt-4 space-y-2">
+              <div class="flex items-center gap-2 text-xs text-slate-500">
+                <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                Draft weekly founder note
+              </div>
+    
+              <div class="flex items-center gap-2 text-xs text-slate-500">
+                <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                Follow up with 3 warm leads
+              </div>
+    
+              <div class="flex items-center gap-2 text-xs text-slate-500">
+                <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                Review product decisions
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    
+      <!-- Content -->
+      <div class="p-6">
+        <div class="flex items-start gap-4">
+          <div class="w-11 h-11 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+            <iconify-icon icon="solar:rocket-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+          </div>
+    
+          <div>
+            <h3 class="text-xl font-normal tracking-tight text-slate-950">
+              Founders &amp; Builders
+            </h3>
+    
+            <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+              Turn scattered calls, customer notes, investor updates, product ideas,
+              and team decisions into clear priorities and next actions.
+            </p>
+    
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-[11px] text-blue-600">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+              Momentum without mental clutter
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+
+    <!-- Card 02 — Executives / Featured Blue -->
+
+    <article class="group relative bg-gradient-to-b from-blue-400 to-blue-600 rounded-[2rem] border border-blue-700 shadow-[0_24px_60px_-30px_rgba(59,130,246,0.55),inset_0_1px_0_rgba(255,255,255,0.35)] overflow-hidden hover:-translate-y-1 transition-all duration-300">
+
+      <!-- Light Glows -->
+
+      <div class="absolute top-[-35%] right-[-20%] w-[18rem] h-[18rem] rounded-full bg-white/25 blur-[4rem] pointer-events-none"></div>
+
+      <div class="absolute bottom-[-40%] left-[-25%] w-[16rem] h-[16rem] rounded-full bg-sky-200/20 blur-[4rem] pointer-events-none"></div>
+
+      <!-- Visual Panel -->
+      <div class="relative mx-4 mt-4 rounded-[1.5rem] overflow-hidden bg-gradient-to-b from-blue-400 to-blue-600 border border-blue-700 shadow-[0_18px_42px_-24px_rgba(59,130,246,0.55),inset_0_1px_0_rgba(255,255,255,0.35)] min-h-[13rem]">
+      
+        <!-- Blue depth glows -->
+        <div class="absolute top-[-35%] right-[-20%] w-[14rem] h-[14rem] rounded-full bg-white/24 blur-[4rem] pointer-events-none">
+        </div>
+        <div class="absolute bottom-[-40%] left-[-25%] w-[14rem] h-[14rem] rounded-full bg-blue-900/16 blur-[4rem] pointer-events-none">
+        </div>
+      
+        <!-- Soft surface texture -->
+        <div class="absolute inset-0 opacity-[0.12]" style="background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.35) 1px, transparent 0); background-size: 1.35rem 1.35rem;">
+        </div>
+      
+        <!-- Mini UI -->
+        <div class="relative p-5">
+          <div class="flex items-center justify-between mb-5">
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-blue-100">
+              EXECUTIVE BRIEF
+            </span>
+      
+            <div class="w-9 h-9 rounded-xl bg-white/90 border border-white flex items-center justify-center shadow-[0_8px_18px_-12px_rgba(15,23,42,0.35),inset_0_1px_0_white]">
+              <iconify-icon icon="solar:case-round-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+            </div>
+          </div>
+      
+          <div class="space-y-3">
+      
+            <!-- Meeting Prep -->
+            <div class="rounded-[1.35rem] bg-white/95 border border-white p-4 shadow-[0_12px_28px_-18px_rgba(15,23,42,0.26),inset_0_1px_0_white]">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-sm font-normal text-slate-900">
+                    Meeting prep
+                  </p>
+                  <p class="mt-1 text-xs text-slate-400 font-light">
+                    Previous decisions summarized
+                  </p>
+                </div>
+      
+                <span class="text-xs text-blue-500 bg-blue-50 border border-blue-100 rounded-full px-2 py-1">
+                  ready
+                </span>
+              </div>
+            </div>
+      
+            <!-- Focus Window -->
+            <div class="rounded-[1.35rem] bg-blue-500/32 text-white border border-white/20 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)] backdrop-blur-sm">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-xs text-blue-100 font-light">
+                    Protected focus
+                  </p>
+                  <p class="mt-1 text-2xl font-light tracking-tight text-white">
+                    10:30–12:00
+                  </p>
+                </div>
+      
+                <div class="w-8 h-8 rounded-xl bg-white/90 border border-white flex items-center justify-center shadow-[inset_0_1px_0_white]">
+                  <iconify-icon icon="solar:lock-keyhole-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+                </div>
+              </div>
+            </div>
+      
+          </div>
+        </div>
+      </div>
+
+      <!-- Content -->
+
+      <div class="relative p-6 text-white">
+
+        <div class="flex items-start gap-4">
+
+          <div class="w-11 h-11 shrink-0 rounded-2xl bg-white/16 border border-white/20 flex items-center justify-center shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
+
+            <iconify-icon icon="solar:user-check-linear" style="stroke-width: 1.5;" class="text-2xl text-white"></iconify-icon>
+
+          </div>
+
+          <div>
+
+            <h3 class="text-xl font-normal tracking-tight text-white">
+
+              Executives &amp; Operators
+
+            </h3>
+
+            <p class="mt-3 text-sm leading-6 text-blue-50/90 font-light">
+
+              Prepare for meetings, track follow-ups, protect focus time,
+
+              and keep decisions from disappearing across tools and conversations.
+
+            </p>
+
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-white/16 border border-white/20 px-3 py-1.5 text-[11px] text-white">
+
+              <span class="w-1.5 h-1.5 rounded-full bg-white"></span>
+
+              Your day, already organized
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </article>
+
+    <!-- Card 03 — Creators -->
+
+    <article class="group bg-white/70 rounded-[2rem] border border-white shadow-[0_18px_44px_-28px_rgba(15,23,42,0.34),inset_0_1px_0_white] overflow-hidden hover:-translate-y-1 hover:bg-white/88 transition-all duration-300">
+
+      <!-- Visual Panel -->
+
+      <div class="relative mx-4 mt-4 rounded-[1.5rem] overflow-hidden bg-gradient-to-b from-white to-slate-100 border border-white shadow-[0_18px_42px_-30px_rgba(15,23,42,0.28),inset_0_1px_0_white] min-h-[13rem]">
+
+        <!-- Texture + Glow -->
+
+        <div class="absolute inset-0 opacity-[0.16]" style="background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 1.5rem 1.5rem;"></div>
+
+        <div class="absolute top-[-30%] left-[-18%] z-0 w-[14rem] h-[14rem] rounded-full bg-sky-200/42 blur-[3.75rem] pointer-events-none">
+        </div>
+
+        <!-- Mini UI -->
+
+        <div class="relative p-5">
+
+          <div class="flex items-center justify-between mb-5">
+
+            <span class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-400">
+
+              CREATOR SYSTEM
+
+            </span>
+
+            <div class="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+
+              <iconify-icon icon="solar:pen-new-square-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+
+            </div>
+
+          </div>
+
+          <div class="rounded-2xl bg-white text-slate-900 border border-slate-200 p-4 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+
+            <p class="text-xs text-slate-400 font-light">
+
+              Content pipeline
+
+            </p>
+
+            <p class="mt-1 text-xl font-normal tracking-tight text-slate-950">
+
+              5 ideas became outlines.
+
+            </p>
+
+            <div class="mt-4 grid grid-cols-3 gap-2">
+
+              <div class="rounded-xl bg-blue-50 border border-blue-100 px-3 py-2 text-center">
+
+                <p class="text-lg font-light text-blue-600">
+
+                  5
+
+                </p>
+
+                <p class="text-[10px] text-blue-500">
+
+                  ideas
+
+                </p>
+
+              </div>
+
+              <div class="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-center">
+
+                <p class="text-lg font-light text-slate-900">
+
+                  3
+
+                </p>
+
+                <p class="text-[10px] text-slate-400">
+
+                  drafts
+
+                </p>
+
+              </div>
+
+              <div class="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-center">
+
+                <p class="text-lg font-light text-slate-900">
+
+                  2
+
+                </p>
+
+                <p class="text-[10px] text-slate-400">
+
+                  scripts
+
+                </p>
+
+              </div>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Content -->
+
+      <div class="p-6">
+
+        <div class="flex items-start gap-4">
+
+          <div class="w-11 h-11 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+            <iconify-icon icon="solar:magic-stick-3-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+          </div>
+
+          <div>
+
+            <h3 class="text-xl font-normal tracking-tight text-slate-950">
+
+              Creators &amp; Consultants
+
+            </h3>
+
+            <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+              Capture ideas, summarize research, draft replies, prepare outlines,
+
+              and keep project context organized across every client or topic.
+
+            </p>
+
+            <div class="mt-5 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-[11px] text-blue-600">
+
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+
+              Ideas turned into output
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </article>
+
+  </div>
+
+  <!-- Metrics / Outcome Strip -->
+  <div class="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+  
+    <!-- Metric 01 -->
+    <div class="bg-white/68 border border-white rounded-[2rem] p-6 shadow-[0_12px_30px_-24px_rgba(15,23,42,0.3),inset_0_1px_0_white]">
+      <div class="w-10 h-10 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+        <iconify-icon icon="solar:widget-5-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+      </div>
+  
+      <p class="text-3xl font-normal tracking-tight text-slate-950">
+        9+ <span class="text-2xl text-slate-700">signals</span>
+      </p>
+  
+      <p class="mt-2 text-sm leading-6 text-slate-500 font-light">
+        Organized from notes, meetings, messages, and documents.
+      </p>
+    </div>
+  
+    <!-- Metric 02 -->
+    <div class="bg-white/68 border border-white rounded-[2rem] p-6 shadow-[0_12px_30px_-24px_rgba(15,23,42,0.3),inset_0_1px_0_white]">
+      <div class="w-10 h-10 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+        <iconify-icon icon="solar:target-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+      </div>
+  
+      <p class="text-3xl font-normal tracking-tight text-slate-950">
+        3 <span class="text-2xl text-slate-700">top priorities</span>
+      </p>
+  
+      <p class="mt-2 text-sm leading-6 text-slate-500 font-light">
+        Surfaced before your day starts.
+      </p>
+    </div>
+  
+    <!-- Metric 03 -->
+    <div class="bg-white/68 border border-white rounded-[2rem] p-6 shadow-[0_12px_30px_-24px_rgba(15,23,42,0.3),inset_0_1px_0_white]">
+      <div class="w-10 h-10 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+        <iconify-icon icon="solar:bell-bing-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+      </div>
+  
+      <p class="text-3xl font-normal tracking-tight text-slate-950">
+        5 <span class="text-2xl text-slate-700">follow-ups</span>
+      </p>
+  
+      <p class="mt-2 text-sm leading-6 text-slate-500 font-light">
+        Recovered from scattered context.
+      </p>
+    </div>
+  
+    <!-- Metric 04 -->
+    <div class="bg-gradient-to-b from-blue-50 to-white border border-blue-100 rounded-[2rem] p-6 shadow-[0_16px_38px_-26px_rgba(59,130,246,0.28),inset_0_1px_0_white]">
+      <div class="w-10 h-10 rounded-2xl bg-white border border-white flex items-center justify-center shadow-[inset_0_1px_0_white] mb-5">
+        <iconify-icon icon="solar:sun-2-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+      </div>
+  
+      <p class="text-3xl font-normal tracking-tight text-blue-600">
+        Daily <span class="text-2xl text-slate-700">brief</span>
+      </p>
+  
+      <p class="mt-2 text-sm leading-6 text-slate-600 font-light">
+        Prepared before your first meeting starts.
+      </p>
+    </div>
+  </div>
+
+</section>
+
+<!-- =====================================================
+
+     Section 06 — Privacy & Control
+
+====================================================== -->
+
+<section id="privacy" class="max-w-7xl mx-auto px-6 py-20">
+
+  <!-- Section Header -->
+
+  <div class="text-center max-w-5xl mx-auto mb-14">
+
+    <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+
+      PRIVACY &amp; CONTROL
+
+    </p>
+
+    <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05] max-w-5xl mx-auto">
+    
+      Your assistant should
+    
+      <span class="block">know your context.</span>
+    
+      <span class="block">Not own it.</span>
+    
+    </h2>
+
+    <p class="mt-6 text-base md:text-lg leading-8 text-slate-600 font-light max-w-3xl mx-auto">
+
+      AURA helps you remember, summarize, and act without turning your workspace into a black box.
+
+      You stay in control of what is saved, used, and carried forward.
+
+    </p>
+
+  </div>
+
+  <!-- Light Privacy Workspace -->
+
+  <div class="relative overflow-hidden rounded-[2.75rem] bg-white/60 backdrop-blur-xl border border-white shadow-[0_30px_80px_-45px_rgba(15,23,42,0.35),inset_0_1px_0_rgba(255,255,255,1)]">
+
+    <!-- Soft Hero-style Glows -->
+
+    <div class="absolute top-[-35%] left-[-10%] w-[34rem] h-[34rem] rounded-full bg-blue-200/35 blur-[6rem] pointer-events-none">
+    </div>
+
+    <div class="absolute bottom-[-40%] right-[-10%] w-[32rem] h-[32rem] rounded-full bg-sky-200/24 blur-[6rem] pointer-events-none">
+    </div>
+
+    <!-- Subtle Dot Texture -->
+
+    <div class="absolute inset-0 opacity-[0.16] pointer-events-none" style="background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 2rem 2rem;">
+    </div>
+
+    <div class="relative grid lg:grid-cols-[0.9fr_1.1fr] gap-8 lg:gap-12 p-6 md:p-10 lg:p-12">
+
+      <!-- Left Trust Copy -->
+
+      <div class="flex flex-col justify-center">
+
+        <div class="inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-xs text-blue-600 font-light w-fit mb-7 shadow-[inset_0_1px_0_white]">
+
+          <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+
+          Private workspace memory
+
+        </div>
+
+        <h3 class="text-3xl md:text-4xl lg:text-[3.25rem] font-normal tracking-tight text-slate-950 leading-[1.08] max-w-2xl">
+        
+          Memory should feel
+        
+          <span class="block whitespace-nowrap">useful, not mysterious.</span>
+        
+        </h3>
+
+        <p class="mt-6 text-base leading-8 text-slate-600 font-light max-w-xl">
+
+          AURA keeps context helpful by making memory visible, reviewable, and adjustable.
+
+          Save what matters, keep temporary context temporary, and reset outdated information when your work changes.
+
+        </p>
+
+        <!-- Trust Pills -->
+
+        <div class="mt-9 flex flex-wrap gap-3">
+
+          <span class="inline-flex items-center gap-2 rounded-full bg-white/72 border border-white px-4 py-2 text-xs text-slate-600 font-light shadow-[0_8px_20px_-16px_rgba(15,23,42,0.24),inset_0_1px_0_white]">
+
+            <iconify-icon icon="solar:database-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+
+            Controlled memory
+
+          </span>
+
+          <span class="inline-flex items-center gap-2 rounded-full bg-white/72 border border-white px-4 py-2 text-xs text-slate-600 font-light shadow-[0_8px_20px_-16px_rgba(15,23,42,0.24),inset_0_1px_0_white]">
+
+            <iconify-icon icon="solar:tuning-2-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+
+            Clear boundaries
+
+          </span>
+
+          <span class="inline-flex items-center gap-2 rounded-full bg-white/72 border border-white px-4 py-2 text-xs text-slate-600 font-light shadow-[0_8px_20px_-16px_rgba(15,23,42,0.24),inset_0_1px_0_white]">
+
+            <iconify-icon icon="solar:restart-circle-linear" style="stroke-width: 1.5;" class="text-base text-blue-500"></iconify-icon>
+
+            Reset anytime
+
+          </span>
+
+        </div>
+
+      </div>
+
+      <!-- Right Privacy Visual -->
+
+      <div class="relative">
+
+        <!-- Main Privacy Panel -->
+
+        <div class="relative isolate overflow-hidden rounded-[2.35rem] bg-gradient-to-b from-white to-slate-50 text-slate-900 border border-slate-200/80 p-5 md:p-6 shadow-[0_30px_70px_-35px_rgba(15,23,42,0.42),0_10px_30px_-24px_rgba(15,23,42,0.24),inset_0_1px_0_white] [clip-path:inset(0_round_2.35rem)]">
+
+          <!-- Inner Light Glow -->
+
+          <div class="absolute top-[-35%] right-[-20%] z-0 w-[22rem] h-[22rem] rounded-full bg-blue-200/45 blur-[4.5rem] pointer-events-none">
+          </div>
+
+          <div class="absolute bottom-[-40%] left-[-20%] z-0 w-[20rem] h-[20rem] rounded-full bg-sky-200/28 blur-[4rem] pointer-events-none">
+          </div>
+
+          <div class="relative z-10">
+
+            <!-- Browser Bar -->
+
+            <div class="flex items-center justify-between border-b border-slate-200 pb-4 mb-5">
+
+              <div class="flex items-center gap-2">
+
+                <span class="w-2.5 h-2.5 rounded-full bg-red-300"></span>
+
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-300"></span>
+
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-300"></span>
+
+              </div>
+
+              <span class="font-['JetBrains_Mono',monospace] text-[10px] text-slate-400 tracking-[-0.04em]">
+
+                PRIVACY CENTER
+
+              </span>
+
+            </div>
+
+            <!-- Privacy Header -->
+
+            <div class="flex items-start justify-between gap-4 mb-6">
+
+              <div>
+
+                <p class="text-xs text-slate-400 font-light mb-1">
+
+                  Workspace memory
+
+                </p>
+
+                <h3 class="text-2xl md:text-3xl font-normal tracking-tight text-slate-950">
+
+                  You control what AURA remembers.
+
+                </h3>
+
+              </div>
+
+              <div class="w-12 h-12 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:lock-keyhole-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+              </div>
+
+            </div>
+
+            <!-- Memory Controls -->
+
+            <div class="grid gap-3">
+
+              <!-- Control 01 -->
+
+              <div class="rounded-2xl bg-slate-50 border border-slate-200 p-4 shadow-[inset_0_1px_0_white]">
+
+                <div class="flex items-center justify-between gap-4">
+
+                  <div class="flex items-center gap-3">
+
+                    <div class="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+
+                      <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+
+                    </div>
+
+                    <div>
+
+                      <p class="text-sm font-normal text-slate-900">
+
+                        Remember project preferences
+
+                      </p>
+
+                      <p class="mt-1 text-xs text-slate-400 font-light">
+
+                        Saved for future briefs and summaries
+
+                      </p>
+
+                    </div>
+
+                  </div>
+
+                  <span class="relative inline-flex h-7 w-12 items-center rounded-full bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.25)]">
+
+                    <span class="inline-block h-5 w-5 translate-x-6 rounded-full bg-white shadow-sm"></span>
+
+                  </span>
+
+                </div>
+
+              </div>
+
+              <!-- Control 02 -->
+
+              <div class="rounded-2xl bg-white border border-slate-200 p-4 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+
+                <div class="flex items-center justify-between gap-4">
+
+                  <div class="flex items-center gap-3">
+
+                    <div class="w-9 h-9 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center">
+
+                      <iconify-icon icon="solar:clock-circle-linear" style="stroke-width: 1.5;" class="text-lg text-slate-600"></iconify-icon>
+
+                    </div>
+
+                    <div>
+
+                      <p class="text-sm font-normal text-slate-900">
+
+                        Temporary meeting context
+
+                      </p>
+
+                      <p class="mt-1 text-xs text-slate-400 font-light">
+
+                        Expires after the daily brief
+
+                      </p>
+
+                    </div>
+
+                  </div>
+
+                  <span class="text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2.5 py-1">
+
+                    temporary
+
+                  </span>
+
+                </div>
+
+              </div>
+
+              <!-- Control 03 -->
+
+              <div class="rounded-2xl bg-gradient-to-b from-blue-50 to-white text-slate-900 border border-blue-100 p-4 shadow-[0_12px_28px_-20px_rgba(59,130,246,0.28),inset_0_1px_0_white]">
+
+                <div class="flex items-center justify-between gap-4">
+
+                  <div class="flex items-center gap-3">
+
+                    <div class="w-9 h-9 rounded-xl bg-white border border-white flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                      <iconify-icon icon="solar:shield-warning-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+
+                    </div>
+
+                    <div>
+
+                      <p class="text-sm font-normal text-slate-900">
+
+                        Sensitive notes stay private
+
+                      </p>
+
+                      <p class="mt-1 text-xs text-slate-500 font-light">
+
+                        Clear boundaries for personal context
+
+                      </p>
+
+                    </div>
+
+                  </div>
+
+                  <span class="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_0_5px_rgba(52,211,153,0.12)]"></span>
+
+                </div>
+
+              </div>
+
+            </div>
+
+            <!-- Bottom Control Bar -->
+
+            <div class="mt-4 rounded-2xl bg-white border border-slate-200 px-4 py-3 shadow-[0_2px_8px_rgba(15,23,42,0.03),inset_0_1px_0_white]">
+
+              <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+
+                <div>
+
+                  <p class="text-xs font-normal text-slate-900">
+
+                    Memory review available anytime
+
+                  </p>
+
+                  <p class="mt-1 text-[11px] text-slate-400 font-light">
+
+                    Edit, remove, or reset context as your work changes.
+
+                  </p>
+
+                </div>
+
+                <button class="inline-flex items-center justify-center rounded-full px-3 py-1.5 text-xs text-blue-600 bg-blue-50 border border-blue-100 shadow-[inset_0_1px_0_white]">
+
+                  Review memory
+
+                </button>
+
+              </div>
+
+            </div>
+
+          </div>
+
+        </div>
+
+        
+
+      </div>
+
+    </div>
+
+    <!-- Trust Cards -->
+
+    <div class="relative grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-6 md:p-8 pt-4 md:pt-2">
+
+      <!-- Trust Card 01 -->
+
+      <div class="relative overflow-hidden bg-white/78 border border-white rounded-[2rem] p-6 shadow-[0_18px_42px_-30px_rgba(15,23,42,0.38),0_4px_14px_-12px_rgba(59,130,246,0.20),inset_0_1px_0_white]">
+        <div class="absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-blue-200/60 to-transparent"></div>
+
+        <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mb-5 shadow-[inset_0_1px_0_white]">
+
+          <iconify-icon icon="solar:database-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+        </div>
+
+        <h3 class="text-lg font-normal tracking-tight text-slate-950">
+
+          Controlled memory
+
+        </h3>
+
+        <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+          Decide what AURA should remember and what should stay temporary.
+
+        </p>
+
+      </div>
+
+      <!-- Trust Card 02 -->
+
+      <div class="relative overflow-hidden bg-white/78 border border-white rounded-[2rem] p-6 shadow-[0_18px_42px_-30px_rgba(15,23,42,0.38),0_4px_14px_-12px_rgba(59,130,246,0.20),inset_0_1px_0_white]">
+        <div class="absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-blue-200/60 to-transparent"></div>
+
+        <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mb-5 shadow-[inset_0_1px_0_white]">
+
+          <iconify-icon icon="solar:folder-security-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+        </div>
+
+        <h3 class="text-lg font-normal tracking-tight text-slate-950">
+
+          Private workspace
+
+        </h3>
+
+        <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+          Notes, summaries, and priorities stay organized around your context.
+
+        </p>
+
+      </div>
+
+      <!-- Trust Card 03 -->
+
+      <div class="relative overflow-hidden bg-white/78 border border-white rounded-[2rem] p-6 shadow-[0_18px_42px_-30px_rgba(15,23,42,0.38),0_4px_14px_-12px_rgba(59,130,246,0.20),inset_0_1px_0_white]">
+        <div class="absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-blue-200/60 to-transparent"></div>
+
+        <div class="w-11 h-11 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mb-5 shadow-[inset_0_1px_0_white]">
+
+          <iconify-icon icon="solar:tuning-2-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+        </div>
+
+        <h3 class="text-lg font-normal tracking-tight text-slate-950">
+
+          Clear boundaries
+
+        </h3>
+
+        <p class="mt-3 text-sm leading-6 text-slate-500 font-light">
+
+          AURA works from the information you provide and the tools you connect.
+
+        </p>
+
+      </div>
+
+      <!-- Trust Card 04 -->
+
+      <div class="bg-gradient-to-b from-blue-50 to-white border border-blue-100 rounded-[2rem] p-6 shadow-[0_16px_38px_-26px_rgba(59,130,246,0.28),inset_0_1px_0_white]">
+
+        <div class="w-11 h-11 rounded-2xl bg-white border border-white flex items-center justify-center mb-5 shadow-[inset_0_1px_0_white]">
+
+          <iconify-icon icon="solar:trash-bin-minimalistic-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-500"></iconify-icon>
+
+        </div>
+
+        <h3 class="text-lg font-normal tracking-tight text-slate-950">
+
+          Reset anytime
+
+        </h3>
+
+        <p class="mt-3 text-sm leading-6 text-slate-600 font-light">
+
+          Remove outdated context when projects, priorities, or preferences change.
+
+        </p>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</section>
+
+<!-- =====================================================
+
+     Section 07 — Pricing
+
+====================================================== -->
+
+<section id="pricing" class="max-w-7xl mx-auto px-6 py-20">
+
+  <!-- Section Intro -->
+  
+  <div class="text-center max-w-5xl mx-auto mb-14">
+  
+    <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+  
+      PRICING
+  
+    </p>
+  
+    <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05] max-w-5xl mx-auto">
+  
+      Choose the plan
+  
+      <span class="block">that fits your workflow.</span>
+  
+    </h2>
+  
+    <p class="mt-6 text-base md:text-lg leading-8 text-slate-600 font-light max-w-3xl mx-auto">
+  
+      Start simple, upgrade when your context grows, and keep the same calm workspace
+  
+      as your notes, projects, meetings, and priorities expand.
+  
+    </p>
+  
+  </div>
+
+    <!-- Skeuomorphic Toggle -->
+    
+    <div class="mb-12 flex justify-center">
+    
+      <label class="relative flex items-center p-1 bg-[#e2e8f0] rounded-full cursor-pointer w-[16rem] shadow-[inset_0_2px_4px_rgba(0,0,0,0.06),0_1px_1px_rgba(255,255,255,1)] border border-slate-300">
+    
+    
+    
+        <input type="checkbox" id="toggle-checkbox" class="sr-only" onchange="togglePricing()">
+    
+        <!-- Toggle Pill -->
+    
+        <div id="toggle-pill" class="absolute left-1 top-1 bottom-1 w-[calc(50%-0.25rem)] bg-gradient-to-b from-white to-slate-50 rounded-full shadow-[0_2px_5px_rgba(0,0,0,0.1),inset_0_1px_0_rgba(255,255,255,1)] border border-slate-200 transition-transform duration-500 ease-[cubic-bezier(0.4,0,0.2,1)]">
+    
+        </div>
+    
+        <span id="label-mo" class="relative w-1/2 text-center text-xs text-slate-800 font-normal transition-colors duration-300 py-2.5 z-10">
+    
+          Monthly
+    
+        </span>
+    
+        <span id="label-yr" class="relative w-1/2 flex items-center justify-center gap-1.5 text-center text-xs text-slate-400 font-normal transition-colors duration-300 py-2.5 z-10">
+    
+          Annually
+    
+        </span>
+    
+      </label>
+    
+    </div>
+
+
+  <!-- Cards Container -->
+
+  <div class="flex flex-col lg:flex-row items-stretch justify-center gap-8 w-full max-w-5xl mx-auto">
+
+    <!-- Card 1: Starter -->
+
+    <div class="relative w-full lg:w-1/3 rounded-[2rem] bg-[#f8fafc] border border-white shadow-[0_10px_30px_-10px_rgba(0,0,0,0.06),inset_0_2px_0_rgba(255,255,255,1)] transition-all duration-500 hover:shadow-[0_20px_40px_-10px_rgba(0,0,0,0.1),inset_0_2px_0_rgba(255,255,255,1)] hover:-translate-y-1">
+
+      <div class="p-8 h-full flex flex-col">
+
+        <!-- Header -->
+
+        <div class="flex justify-between items-start">
+
+          <div>
+
+            <h3 class="text-xs font-medium text-slate-400 uppercase tracking-widest mb-4">
+
+              Starter
+
+            </h3>
+
+            <div class="flex items-baseline text-slate-800">
+
+              <span class="text-4xl font-normal tracking-tight">$</span>
+
+              <span class="text-5xl font-normal tracking-tight price-val" data-monthly="15" data-yearly="12">15</span>
+
+              <span class="text-xs font-light text-slate-400 ml-1">/mo</span>
+
+            </div>
+
+            <p class="mt-4 text-xs font-light text-slate-500 leading-relaxed">
+
+              For individuals who want a calmer way to capture ideas, notes, and daily priorities.
+
+            </p>
+
+          </div>
+
+          <div class="w-11 h-11 min-w-11 min-h-11 shrink-0 rounded-2xl bg-gradient-to-b from-white to-slate-50 shadow-[0_6px_16px_rgba(15,23,42,0.08),inset_0_1px_0_white] flex items-center justify-center text-slate-400 border border-slate-200">
+            <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="block text-[22px] leading-none"></iconify-icon>
+          </div>
+
+        </div>
+
+        <!-- Expanded Body -->
+
+        <div class="pt-6 flex flex-col gap-6 flex-1">
+
+          <div class="h-px w-full bg-gradient-to-r from-transparent via-slate-200 to-transparent"></div>
+
+          <ul class="flex flex-col gap-y-3 flex-grow">
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Personal daily brief
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Voice notes and quick capture
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Basic summaries and reminders
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Private memory controls
+
+            </li>
+
+          </ul>
+
+          <button class="mt-2 w-full py-3 rounded-xl bg-gradient-to-b from-white to-slate-50 border border-slate-200 text-slate-700 font-normal text-xs shadow-[0_2px_4px_rgba(0,0,0,0.02),inset_0_1px_0_white] hover:from-slate-50 hover:to-slate-100 active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.05)] transition-all">
+
+            Get Started
+
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Card 2: Pro -->
+
+    <div class="relative w-full lg:w-1/3 rounded-[2rem] bg-gradient-to-b from-blue-50/50 to-[#f8fafc] border border-white shadow-[0_15px_35px_-10px_rgba(59,130,246,0.15),inset_0_2px_0_rgba(255,255,255,1)] transition-all duration-500 hover:shadow-[0_25px_50px_-12px_rgba(59,130,246,0.2),inset_0_2px_0_rgba(255,255,255,1)] hover:-translate-y-1">
+
+      <!-- Floating Badge -->
+
+      <div class="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-gradient-to-b from-blue-400 to-blue-500 text-white text-[0.65rem] font-medium rounded-full shadow-[0_2px_6px_rgba(59,130,246,0.4),inset_0_1px_0_rgba(255,255,255,0.4)] border border-blue-600 tracking-wide z-10">
+
+        Recommended
+
+      </div>
+
+      <div class="p-8 h-full flex flex-col">
+
+        <!-- Header -->
+
+        <div class="flex justify-between items-start pt-2">
+
+          <div>
+
+            <h3 class="text-xs font-medium text-blue-500 uppercase tracking-widest mb-4">
+
+              Pro
+
+            </h3>
+
+            <div class="flex items-baseline text-slate-800">
+
+              <span class="text-4xl font-normal tracking-tight">$</span>
+
+              <span class="text-5xl font-normal tracking-tight price-val" data-monthly="65" data-yearly="45">65</span>
+
+              <span class="text-xs font-light text-slate-400 ml-1">/mo</span>
+
+            </div>
+
+            <p class="mt-4 text-xs font-light text-slate-500 leading-relaxed">
+
+              For busy professionals who want deeper context, faster summaries, and stronger daily execution.
+
+            </p>
+
+          </div>
+
+          <div class="w-11 h-11 min-w-11 min-h-11 shrink-0 rounded-2xl bg-gradient-to-b from-white to-blue-50 shadow-[0_6px_16px_rgba(59,130,246,0.12),inset_0_1px_0_white] flex items-center justify-center text-blue-500 border border-blue-100">
+            <iconify-icon icon="solar:stars-linear" style="stroke-width: 1.5;" class="block text-[22px] leading-none"></iconify-icon>
+          </div>
+
+        </div>
+
+        <!-- Expanded Body -->
+
+        <div class="pt-6 flex flex-col gap-6 flex-1">
+
+          <div class="h-px w-full bg-gradient-to-r from-transparent via-blue-200 to-transparent"></div>
+
+          <ul class="flex flex-col gap-y-3 flex-grow">
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-700">
+
+              <iconify-icon icon="solar:check-circle-linear" class="text-blue-500 text-lg"></iconify-icon>
+
+              Everything in Starter
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-700">
+
+              <iconify-icon icon="solar:check-circle-bold" class="text-blue-500 text-lg"></iconify-icon>
+
+              Advanced document summaries
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-700">
+
+              <iconify-icon icon="solar:check-circle-bold" class="text-blue-500 text-lg"></iconify-icon>
+
+              Suggested replies and action recovery
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-700">
+
+              <iconify-icon icon="solar:check-circle-bold" class="text-blue-500 text-lg"></iconify-icon>
+
+              Priority and focus window planning
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-700">
+
+              <iconify-icon icon="solar:check-circle-bold" class="text-blue-500 text-lg"></iconify-icon>
+
+              Extended private memory
+
+            </li>
+
+          </ul>
+
+          <button class="mt-2 w-full py-3 rounded-xl bg-gradient-to-b from-blue-500 to-blue-600 border border-blue-700 text-white font-normal text-xs shadow-[0_4px_10px_rgba(59,130,246,0.3),inset_0_1px_0_rgba(255,255,255,0.3)] hover:from-blue-400 hover:to-blue-500 active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.2)] transition-all">
+
+            Start Free Trial
+
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Card 3: Team -->
+
+    <div class="relative w-full lg:w-1/3 rounded-[2rem] bg-[#f8fafc] border border-white shadow-[0_10px_30px_-10px_rgba(0,0,0,0.06),inset_0_2px_0_rgba(255,255,255,1)] transition-all duration-500 hover:shadow-[0_20px_40px_-10px_rgba(0,0,0,0.1),inset_0_2px_0_rgba(255,255,255,1)] hover:-translate-y-1">
+
+      <div class="p-8 h-full flex flex-col">
+
+        <!-- Header -->
+
+        <div class="flex justify-between items-start">
+
+          <div>
+
+            <h3 class="text-xs font-medium text-slate-400 uppercase tracking-widest mb-4">
+
+              Team
+
+            </h3>
+
+            <div class="flex items-baseline text-slate-800">
+
+              <span class="text-4xl font-normal tracking-tight">$</span>
+
+              <span class="text-5xl font-normal tracking-tight price-val" data-monthly="249" data-yearly="199">249</span>
+
+              <span class="text-xs font-light text-slate-400 ml-1">/mo</span>
+
+            </div>
+
+            <p class="mt-4 text-xs font-light text-slate-500 leading-relaxed">
+
+              For teams that need shared context, stronger controls, and reliable execution across projects.
+
+            </p>
+
+          </div>
+
+          <div class="w-11 h-11 min-w-11 min-h-11 shrink-0 rounded-2xl bg-gradient-to-b from-white to-slate-50 shadow-[0_6px_16px_rgba(15,23,42,0.08),inset_0_1px_0_white] flex items-center justify-center text-slate-400 border border-slate-200">
+          
+            <iconify-icon icon="solar:buildings-2-linear" style="stroke-width: 1.5;" class="block text-[22px] leading-none"></iconify-icon>
+          
+          </div>
+
+        </div>
+
+        <!-- Expanded Body -->
+
+        <div class="pt-6 flex flex-col gap-6 flex-1">
+
+          <div class="h-px w-full bg-gradient-to-r from-transparent via-slate-200 to-transparent"></div>
+
+          <ul class="flex flex-col gap-y-3 flex-grow">
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Everything in Pro
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Shared workspace memory
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Team summaries and briefings
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Admin controls and permissions
+
+            </li>
+
+            <li class="flex items-center gap-3 text-xs font-light text-slate-600">
+
+              <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-blue-400 text-lg"></iconify-icon>
+
+              Priority support
+
+            </li>
+
+          </ul>
+
+          <button class="mt-2 w-full py-3 rounded-xl bg-gradient-to-b from-white to-slate-50 border border-slate-200 text-slate-700 font-normal text-xs shadow-[0_2px_4px_rgba(0,0,0,0.02),inset_0_1px_0_white] hover:from-slate-50 hover:to-slate-100 active:shadow-[inset_0_2px_4px_rgba(0,0,0,0.05)] transition-all">
+
+            Contact Sales
+
+          </button>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</section>
+
+<!-- =====================================================
+
+     Section 08 — FAQ
+
+====================================================== -->
+
+<section id="faq" class="max-w-7xl mx-auto px-6 py-20">
+
+  <!-- Section Intro -->
+
+  <div class="text-center max-w-3xl mx-auto mb-14">
+
+    <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-4">
+
+      FAQ
+
+    </p>
+
+    <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-slate-950 leading-[1.05]">
+
+      Common questions.
+
+      <span class="block">Clear answers.</span>
+
+    </h2>
+
+    <p class="mt-6 text-base md:text-lg leading-8 text-slate-600 font-light">
+
+      A few practical answers about how AURA captures context, protects memory,
+
+      and helps turn scattered information into clear action.
+
+    </p>
+
+  </div>
+
+  <!-- FAQ Shell -->
+
+  <div class="relative overflow-hidden rounded-[2.75rem] bg-white/60 backdrop-blur-xl border border-white shadow-[0_30px_80px_-45px_rgba(15,23,42,0.35),inset_0_1px_0_rgba(255,255,255,1)] p-4 md:p-6 lg:p-8">
+
+    <!-- Soft Background Glows -->
+
+    <div class="absolute top-[-35%] left-[-10%] w-[34rem] h-[34rem] rounded-full bg-blue-200/35 blur-[6rem] pointer-events-none">
+    </div>
+
+    <div class="absolute bottom-[-40%] right-[-10%] w-[32rem] h-[32rem] rounded-full bg-sky-200/22 blur-[6rem] pointer-events-none">
+    </div>
+
+    <!-- Dot Texture -->
+
+    <div class="absolute inset-0 opacity-[0.16] pointer-events-none" style="background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 2rem 2rem;">
+    </div>
+
+    <div class="relative grid lg:grid-cols-[0.82fr_1.18fr] gap-6 lg:gap-8 items-start">
+
+      <!-- Left Support Card -->
+
+      <div class="rounded-[2.25rem] bg-gradient-to-b from-[#1d2a3d] to-[#131c2b] text-white border border-white/10 p-6 md:p-8 shadow-[0_24px_60px_-35px_rgba(15,23,42,0.62),inset_0_1px_0_rgba(255,255,255,0.13)] overflow-hidden relative">
+
+        <!-- Inner Texture -->
+
+        <div class="absolute inset-0 opacity-[0.10]" style="background-image: linear-gradient(rgba(255,255,255,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.08) 1px, transparent 1px); background-size: 34px 34px;">
+        </div>
+
+        <!-- Soft Glow -->
+
+        <div class="absolute top-[-35%] right-[-25%] w-[18rem] h-[18rem] rounded-full bg-blue-400/18 blur-[4.5rem] pointer-events-none">
+        </div>
+
+        <div class="absolute bottom-[-35%] left-[-20%] w-[16rem] h-[16rem] rounded-full bg-sky-200/10 blur-[4rem] pointer-events-none">
+        </div>
+
+        <div class="relative">
+
+          <div class="w-12 h-12 rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] mb-8">
+
+            <iconify-icon icon="solar:question-circle-linear" style="stroke-width: 1.5;" class="text-2xl text-blue-200"></iconify-icon>
+
+          </div>
+
+          <p class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-200 mb-4">
+
+            STILL DECIDING?
+
+          </p>
+
+          <h3 class="text-3xl md:text-4xl font-normal tracking-tight text-white leading-[1.08]">
+
+            Start simple.
+
+            <span class="block">Stay in control.</span>
+
+          </h3>
+
+          <p class="mt-5 text-sm md:text-base leading-7 text-slate-300 font-light">
+
+            AURA is designed to reduce mental clutter without taking over your workflow.
+
+            You decide what gets saved, what stays temporary, and what becomes part of your daily brief.
+
+          </p>
+
+          <div class="mt-8 grid gap-3">
+
+            <div class="rounded-2xl bg-white/[0.07] border border-white/10 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+
+              <div class="flex items-center gap-3">
+
+                <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-xl text-blue-200"></iconify-icon>
+
+                <span class="text-sm text-white font-normal">
+
+                  Privacy-first memory controls
+
+                </span>
+
+              </div>
+
+            </div>
+
+            <div class="rounded-2xl bg-white/[0.07] border border-white/10 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+
+              <div class="flex items-center gap-3">
+
+                <iconify-icon icon="solar:document-text-linear" style="stroke-width: 1.5;" class="text-xl text-blue-200"></iconify-icon>
+
+                <span class="text-sm text-white font-normal">
+
+                  Summaries, priorities, and follow-ups
+
+                </span>
+
+              </div>
+
+            </div>
+
+            <div class="rounded-2xl bg-white/[0.07] border border-white/10 px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+
+              <div class="flex items-center gap-3">
+
+                <iconify-icon icon="solar:restart-circle-linear" style="stroke-width: 1.5;" class="text-xl text-blue-200"></iconify-icon>
+
+                <span class="text-sm text-white font-normal">
+
+                  Review or reset context anytime
+
+                </span>
+
+              </div>
+
+            </div>
+
+          </div>
+
+          <div class="mt-8 flex flex-col sm:flex-row gap-3">
+
+            <a href="#pricing" class="inline-flex items-center justify-center gap-2 rounded-full px-5 py-3 bg-white text-slate-950 text-sm font-normal border border-white shadow-[inset_0_1px_0_white] hover:bg-slate-100 hover:-translate-y-0.5 transition-all">
+
+              Try AURA Free
+
+              <iconify-icon icon="solar:arrow-right-linear" style="stroke-width: 1.5;" class="text-lg"></iconify-icon>
+
+            </a>
+
+            <a href="#privacy" class="inline-flex items-center justify-center rounded-full px-5 py-3 bg-white/[0.07] text-white text-sm font-normal border border-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:bg-white/[0.1] transition-all">
+
+              Review Privacy
+
+            </a>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Accordion List -->
+
+      <div class="space-y-3">
+
+        <!-- FAQ 01 -->
+
+        <details class="group rounded-[2rem] bg-white/72 border border-white shadow-[0_14px_34px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] overflow-hidden open:bg-white/90 transition-all">
+
+          <summary class="cursor-pointer list-none px-5 md:px-6 py-5 flex items-center justify-between gap-5">
+
+            <div class="flex items-center gap-4">
+
+              <div class="w-10 h-10 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:chat-round-like-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+
+              </div>
+
+              <h3 class="text-base md:text-lg font-normal tracking-tight text-slate-950">
+
+                How is AURA different from a regular chatbot?
+
+              </h3>
+
+            </div>
+
+            <div class="w-9 h-9 shrink-0 rounded-full bg-gradient-to-b from-white to-slate-50 border border-slate-200 flex items-center justify-center shadow-[0_4px_10px_rgba(15,23,42,0.05),inset_0_1px_0_white]">
+
+              <iconify-icon icon="solar:add-circle-linear" style="stroke-width: 1.5;" class="text-xl text-slate-500 group-open:rotate-45 transition-transform"></iconify-icon>
+
+            </div>
+
+          </summary>
+
+          <div class="px-5 md:px-6 pb-6 md:pl-[5.75rem]">
+
+            <p class="text-sm md:text-base leading-7 text-slate-600 font-light">
+
+              A regular chatbot waits for prompts. AURA works more like a personal operating layer:
+
+              it captures context, summarizes what matters, surfaces priorities, finds follow-ups,
+
+              and helps you start from organized action instead of a blank chat box.
+
+            </p>
+
+          </div>
+
+        </details>
+
+        <!-- FAQ 02 -->
+
+        <details class="group rounded-[2rem] bg-white/72 border border-white shadow-[0_14px_34px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] overflow-hidden open:bg-white/90 transition-all">
+
+          <summary class="cursor-pointer list-none px-5 md:px-6 py-5 flex items-center justify-between gap-5">
+
+            <div class="flex items-center gap-4">
+
+              <div class="w-10 h-10 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:microphone-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+
+              </div>
+
+              <h3 class="text-base md:text-lg font-normal tracking-tight text-slate-950">
+
+                What can I capture with AURA?
+
+              </h3>
+
+            </div>
+
+            <div class="w-9 h-9 shrink-0 rounded-full bg-gradient-to-b from-white to-slate-50 border border-slate-200 flex items-center justify-center shadow-[0_4px_10px_rgba(15,23,42,0.05),inset_0_1px_0_white]">
+
+              <iconify-icon icon="solar:add-circle-linear" style="stroke-width: 1.5;" class="text-xl text-slate-500 group-open:rotate-45 transition-transform"></iconify-icon>
+
+            </div>
+
+          </summary>
+
+          <div class="px-5 md:px-6 pb-6 md:pl-[5.75rem]">
+
+            <p class="text-sm md:text-base leading-7 text-slate-600 font-light">
+
+              You can capture voice notes, rough ideas, links, documents, meeting fragments,
+
+              messages, reminders, and follow-ups. The goal is to collect useful context
+
+              without interrupting your flow.
+
+            </p>
+
+          </div>
+
+        </details>
+
+        <!-- FAQ 03 -->
+
+        <details class="group rounded-[2rem] bg-white/72 border border-white shadow-[0_14px_34px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] overflow-hidden open:bg-white/90 transition-all">
+
+          <summary class="cursor-pointer list-none px-5 md:px-6 py-5 flex items-center justify-between gap-5">
+
+            <div class="flex items-center gap-4">
+
+              <div class="w-10 h-10 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:devices-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+
+              </div>
+
+              <h3 class="text-base md:text-lg font-normal tracking-tight text-slate-950">
+
+                Does AURA work across desktop and mobile?
+
+              </h3>
+
+            </div>
+
+            <div class="w-9 h-9 shrink-0 rounded-full bg-gradient-to-b from-white to-slate-50 border border-slate-200 flex items-center justify-center shadow-[0_4px_10px_rgba(15,23,42,0.05),inset_0_1px_0_white]">
+
+              <iconify-icon icon="solar:add-circle-linear" style="stroke-width: 1.5;" class="text-xl text-slate-500 group-open:rotate-45 transition-transform"></iconify-icon>
+
+            </div>
+
+          </summary>
+
+          <div class="px-5 md:px-6 pb-6 md:pl-[5.75rem]">
+
+            <p class="text-sm md:text-base leading-7 text-slate-600 font-light">
+
+              Yes. The product story is designed around capturing from wherever you are:
+
+              quick notes on mobile, deeper review on desktop, and a consistent daily brief
+
+              that keeps priorities connected.
+
+            </p>
+
+          </div>
+
+        </details>
+
+        <!-- FAQ 04 -->
+
+        <details class="group rounded-[2rem] bg-white/72 border border-white shadow-[0_14px_34px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] overflow-hidden open:bg-white/90 transition-all">
+
+          <summary class="cursor-pointer list-none px-5 md:px-6 py-5 flex items-center justify-between gap-5">
+
+            <div class="flex items-center gap-4">
+
+              <div class="w-10 h-10 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:sun-2-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+
+              </div>
+
+              <h3 class="text-base md:text-lg font-normal tracking-tight text-slate-950">
+
+                What happens in the daily brief?
+
+              </h3>
+
+            </div>
+
+            <div class="w-9 h-9 shrink-0 rounded-full bg-gradient-to-b from-white to-slate-50 border border-slate-200 flex items-center justify-center shadow-[0_4px_10px_rgba(15,23,42,0.05),inset_0_1px_0_white]">
+
+              <iconify-icon icon="solar:add-circle-linear" style="stroke-width: 1.5;" class="text-xl text-slate-500 group-open:rotate-45 transition-transform"></iconify-icon>
+
+            </div>
+
+          </summary>
+
+          <div class="px-5 md:px-6 pb-6 md:pl-[5.75rem]">
+
+            <p class="text-sm md:text-base leading-7 text-slate-600 font-light">
+
+              The daily brief gives you a clear starting point: top priorities, upcoming meetings,
+
+              unresolved follow-ups, useful summaries, reminders, and suggested next actions.
+
+              It helps you begin the day with direction instead of searching across tools.
+
+            </p>
+
+          </div>
+
+        </details>
+
+        <!-- FAQ 05 -->
+
+        <details class="group rounded-[2rem] bg-white/72 border border-white shadow-[0_14px_34px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] overflow-hidden open:bg-white/90 transition-all">
+
+          <summary class="cursor-pointer list-none px-5 md:px-6 py-5 flex items-center justify-between gap-5">
+
+            <div class="flex items-center gap-4">
+
+              <div class="w-10 h-10 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+
+              </div>
+
+              <h3 class="text-base md:text-lg font-normal tracking-tight text-slate-950">
+
+                Can I delete or reset memory?
+
+              </h3>
+
+            </div>
+
+            <div class="w-9 h-9 shrink-0 rounded-full bg-gradient-to-b from-white to-slate-50 border border-slate-200 flex items-center justify-center shadow-[0_4px_10px_rgba(15,23,42,0.05),inset_0_1px_0_white]">
+
+              <iconify-icon icon="solar:add-circle-linear" style="stroke-width: 1.5;" class="text-xl text-slate-500 group-open:rotate-45 transition-transform"></iconify-icon>
+
+            </div>
+
+          </summary>
+
+          <div class="px-5 md:px-6 pb-6 md:pl-[5.75rem]">
+
+            <p class="text-sm md:text-base leading-7 text-slate-600 font-light">
+
+              Yes. Memory should be reviewable, editable, and removable. As your projects,
+
+              priorities, or preferences change, you can clean up outdated context and keep AURA
+
+              aligned with how you work now.
+
+            </p>
+
+          </div>
+
+        </details>
+
+        <!-- FAQ 06 -->
+
+        <details class="group rounded-[2rem] bg-white/72 border border-white shadow-[0_14px_34px_-26px_rgba(15,23,42,0.32),inset_0_1px_0_white] overflow-hidden open:bg-white/90 transition-all">
+
+          <summary class="cursor-pointer list-none px-5 md:px-6 py-5 flex items-center justify-between gap-5">
+
+            <div class="flex items-center gap-4">
+
+              <div class="w-10 h-10 shrink-0 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+
+                <iconify-icon icon="solar:user-check-linear" style="stroke-width: 1.5;" class="text-xl text-blue-500"></iconify-icon>
+
+              </div>
+
+              <h3 class="text-base md:text-lg font-normal tracking-tight text-slate-950">
+
+                Who is AURA best for?
+
+              </h3>
+
+            </div>
+
+            <div class="w-9 h-9 shrink-0 rounded-full bg-gradient-to-b from-white to-slate-50 border border-slate-200 flex items-center justify-center shadow-[0_4px_10px_rgba(15,23,42,0.05),inset_0_1px_0_white]">
+
+              <iconify-icon icon="solar:add-circle-linear" style="stroke-width: 1.5;" class="text-xl text-slate-500 group-open:rotate-45 transition-transform"></iconify-icon>
+
+            </div>
+
+          </summary>
+
+          <div class="px-5 md:px-6 pb-6 md:pl-[5.75rem]">
+
+            <p class="text-sm md:text-base leading-7 text-slate-600 font-light">
+
+              AURA is best for founders, executives, creators, consultants, and busy professionals
+
+              who manage lots of information and need faster clarity without constantly reorganizing
+
+              their workspace manually.
+
+            </p>
+
+          </div>
+
+        </details>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</section>
+
+
+<!-- =====================================================
+     Section 09 — Final CTA
+====================================================== -->
+
+<section id="final-cta" class="max-w-7xl mx-auto px-6 pt-14 pb-20">
+
+  <!-- Transition Copy Between FAQ + CTA -->
+  <div class="relative text-center max-w-3xl mx-auto mb-10">
+    <div class="absolute inset-x-0 -top-10 h-24 bg-gradient-to-b from-white/0 via-blue-100/20 to-transparent blur-2xl pointer-events-none">
+    </div>
+
+    <p class="relative font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-500 mb-3">
+      FINAL STEP
+    </p>
+
+    <h2 class="relative text-3xl md:text-4xl font-normal tracking-tight text-slate-950 leading-[1.08]">
+      Less organizing.
+      <span class="block">More moving forward.</span>
+    </h2>
+
+    <p class="relative mt-4 text-sm md:text-base leading-7 text-slate-600 font-light">
+      Once your context is captured, AURA helps turn it into a calmer tomorrow.
+    </p>
+  </div>
+
+  <!-- Blue CTA Shell -->
+  <div class="relative isolate overflow-hidden rounded-[2.75rem] bg-gradient-to-b from-blue-400 via-blue-500 to-blue-600 text-white border border-blue-700 shadow-[0_40px_90px_-45px_rgba(59,130,246,0.72),inset_0_1px_0_rgba(255,255,255,0.34)] [clip-path:inset(0_round_2.75rem)]">
+
+    <!-- Blue surface texture -->
+    <div class="absolute inset-0 z-0 opacity-[0.13]" style="background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.35) 1px, transparent 0); background-size: 2rem 2rem;">
+    </div>
+
+    <!-- Blue depth glows -->
+    <div class="absolute top-[-35%] left-[-12%] z-0 w-[34rem] h-[34rem] rounded-full bg-white/26 blur-[6rem] pointer-events-none">
+    </div>
+    <div class="absolute bottom-[-40%] right-[-12%] z-0 w-[32rem] h-[32rem] rounded-full bg-blue-900/18 blur-[6rem] pointer-events-none">
+    </div>
+    <div class="absolute top-[30%] left-[48%] z-0 w-[20rem] h-[20rem] rounded-full bg-sky-200/18 blur-[5rem] pointer-events-none">
+    </div>
+
+    <!-- Floating Bubble: Top Left -->
+    <div class="hidden md:block absolute left-10 top-12 z-20 rotate-[-5deg] animate-[auraFinalFloatOne_5.5s_ease-in-out_infinite]">
+      <div class="rounded-2xl bg-white border border-white px-4 py-3 shadow-[0_28px_60px_-24px_rgba(15,23,42,0.52),inset_0_1px_0_white] min-w-[12.5rem]">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+            <iconify-icon icon="solar:sun-2-linear" style="stroke-width: 1.5;" class="text-lg text-blue-500"></iconify-icon>
+          </div>
+
+          <div>
+            <p class="text-xs text-slate-950 font-normal">
+              Daily brief ready
+            </p>
+            <p class="text-xs text-slate-500 font-light">
+              3 priorities surfaced
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Floating Bubble: Bottom Right -->
+    <div class="hidden md:block absolute right-10 bottom-12 z-20 rotate-[5deg] animate-[auraFinalFloatTwo_6.25s_ease-in-out_infinite]">
+      <div class="rounded-2xl bg-white border border-white px-4 py-3 shadow-[0_28px_60px_-24px_rgba(15,23,42,0.52),inset_0_1px_0_white] min-w-[12.5rem]">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center shadow-[inset_0_1px_0_white]">
+            <iconify-icon icon="solar:check-circle-linear" style="stroke-width: 1.5;" class="text-lg text-emerald-500"></iconify-icon>
+          </div>
+
+          <div>
+            <p class="text-xs text-slate-950 font-normal">
+              Follow-ups handled
+            </p>
+            <p class="text-xs text-slate-500 font-light">
+              Work feels lighter
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CTA Content -->
+    <div class="relative z-10 px-6 py-24 md:px-12 md:py-28 text-center">
+
+      <div class="inline-flex items-center gap-2 rounded-full bg-white/16 border border-white/20 px-3.5 py-2 mb-8 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]">
+        <span class="w-1.5 h-1.5 rounded-full bg-white shadow-[0_0_0_5px_rgba(255,255,255,0.14)]"></span>
+
+        <span class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.04em] text-blue-50">
+          READY WHEN YOUR DAY GETS MESSY
+        </span>
+      </div>
+
+      <h2 class="text-4xl md:text-5xl lg:text-6xl font-normal tracking-tight text-white leading-[1.05] max-w-5xl mx-auto">
+        Start tomorrow with
+        <span class="block">less scattered context.</span>
+      </h2>
+
+      <p class="mt-6 text-base md:text-lg leading-8 text-blue-50/90 font-light max-w-3xl mx-auto">
+        Capture what happens, keep your priorities visible, and let AURA turn messy information
+        into summaries, reminders, follow-ups, and next actions you can trust.
+      </p>
+
+      <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-3">
+        <a href="#pricing" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-full px-7 py-3.5 bg-gradient-to-b from-white to-blue-50 border border-white text-blue-600 text-sm font-normal shadow-[0_14px_30px_rgba(15,23,42,0.18),inset_0_1px_0_white] hover:from-white hover:to-white hover:-translate-y-0.5 active:shadow-[inset_0_2px_4px_rgba(15,23,42,0.08)] transition-all duration-300">
+          Try AURA Free
+          <iconify-icon icon="solar:arrow-right-linear" style="stroke-width: 1.5;" class="text-lg"></iconify-icon>
+        </a>
+
+        <a href="#workflow" class="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-full px-7 py-3.5 bg-white/14 border border-white/24 text-white text-sm font-normal shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] hover:bg-white/20 hover:-translate-y-0.5 transition-all duration-300">
+          See Workflow
+        </a>
+      </div>
+
+      <!-- Small Trust Row -->
+      <div class="mt-8 flex flex-col sm:flex-row flex-wrap items-center justify-center gap-3 text-xs text-blue-50/78 font-light">
+        <span class="inline-flex items-center gap-2">
+          <iconify-icon icon="solar:shield-check-linear" style="stroke-width: 1.5;" class="text-base text-white"></iconify-icon>
+          Private by design
+        </span>
+
+        <span class="hidden sm:block w-1 h-1 rounded-full bg-white/40"></span>
+
+        <span class="inline-flex items-center gap-2">
+          <iconify-icon icon="solar:database-linear" style="stroke-width: 1.5;" class="text-base text-white"></iconify-icon>
+          Controlled memory
+        </span>
+
+        <span class="hidden sm:block w-1 h-1 rounded-full bg-white/40"></span>
+
+        <span class="inline-flex items-center gap-2">
+          <iconify-icon icon="solar:restart-circle-linear" style="stroke-width: 1.5;" class="text-base text-white"></iconify-icon>
+          Reset anytime
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    @keyframes auraFinalFloatOne {
+
+      0%,
+      100% {
+        transform: translateY(0) rotate(-5deg);
+      }
+
+      50% {
+        transform: translateY(-10px) rotate(-3deg);
+      }
+    }
+
+    @keyframes auraFinalFloatTwo {
+
+      0%,
+      100% {
+        transform: translateY(0) rotate(5deg);
+      }
+
+      50% {
+        transform: translateY(10px) rotate(3deg);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+
+      .animate-\[auraFinalFloatOne_5\.5s_ease-in-out_infinite\],
+      .animate-\[auraFinalFloatTwo_6\.25s_ease-in-out_infinite\] {
+        animation: none;
+      }
+    }
+  </style>
+</section>
+
+<!-- =====================================================
+
+     Footer
+
+====================================================== -->
+
+<footer class="relative z-10 w-full bg-white/72 border-t border-white shadow-[0_-18px_55px_-40px_rgba(15,23,42,0.45),inset_0_1px_0_white] backdrop-blur-xl">
+
+  <!-- Subtle footer glow -->
+
+  <div class="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-200 to-transparent"></div>
+
+  <div class="max-w-7xl mx-auto px-6 py-12">
+
+    <!-- Main Footer Grid -->
+
+    <div class="grid grid-cols-1 lg:grid-cols-[1.2fr_1.8fr] gap-10 lg:gap-16">
+
+      <!-- Brand / Summary -->
+
+      <div class="flex flex-col items-center lg:items-start text-center lg:text-left">
+
+        <a href="#" class="flex items-center gap-3 group">
+
+          <span class="w-10 h-10 rounded-full bg-gradient-to-b from-white to-slate-100 border border-slate-200 shadow-[0_2px_8px_rgba(15,23,42,0.06),inset_0_1px_0_white] flex items-center justify-center">
+
+            <span class="font-['JetBrains_Mono',monospace] text-xs font-medium tracking-[-0.08em] text-blue-600">
+
+              AU
+
+            </span>
+
+          </span>
+
+          <span class="flex flex-col justify-center leading-none">
+
+            <span class="font-['JetBrains_Mono',monospace] text-sm font-semibold tracking-[-0.08em] text-slate-950 group-hover:text-blue-600 transition-colors">
+
+              AURA
+
+            </span>
+
+          <span class="mt-1 text-[10px] font-light tracking-[-0.03em] text-slate-400">
+
+              Personal AI
+
+            </span>
+
+          </span>
+
+        </a>
+
+        <p class="mt-5 max-w-sm text-sm leading-6 text-slate-500 font-light">
+
+          A calmer way to capture context, organize priorities, and move through your day with less friction.
+
+        </p>
+
+        <div class="mt-6 inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-100 px-3 py-1.5 text-xs text-blue-600 shadow-[inset_0_1px_0_white]">
+
+          <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+
+          Built for busy minds
+
+        </div>
+
+      </div>
+
+      <!-- Footer Link Groups -->
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-8 text-center sm:text-left">
+
+        <!-- Product -->
+
+        <div>
+
+          <p class="font-['JetBrains_Mono',monospace] text-[10px] font-medium tracking-[-0.04em] text-slate-400 uppercase mb-4">
+
+            Product
+
+          </p>
+
+          <div class="flex flex-col gap-3 text-sm text-slate-500 font-light">
+
+            <a href="#features" class="hover:text-blue-600 transition-colors">
+
+              Features
+
+            </a>
+
+            <a href="#workflow" class="hover:text-blue-600 transition-colors">
+
+              Workflow
+
+            </a>
+
+            <a href="#built-for" class="hover:text-blue-600 transition-colors">
+
+              Built For
+
+            </a>
+
+            <a href="#pricing" class="hover:text-blue-600 transition-colors">
+
+              Pricing
+
+            </a>
+
+          </div>
+
+        </div>
+
+        <!-- Workflow -->
+
+        <div>
+
+          <p class="font-['JetBrains_Mono',monospace] text-[10px] font-medium tracking-[-0.04em] text-slate-400 uppercase mb-4">
+
+            Workflow
+
+          </p>
+
+          <div class="flex flex-col gap-3 text-sm text-slate-500 font-light">
+
+            <a href="#workflow" class="hover:text-blue-600 transition-colors">
+
+              Capture ideas
+
+            </a>
+
+            <a href="#features" class="hover:text-blue-600 transition-colors">
+
+              Summarize context
+
+            </a>
+
+            <a href="#features" class="hover:text-blue-600 transition-colors">
+
+              Recover follow-ups
+
+            </a>
+
+            <a href="#features" class="hover:text-blue-600 transition-colors">
+
+              Daily brief
+
+            </a>
+
+          </div>
+
+        </div>
+
+        <!-- Trust -->
+
+        <div>
+
+          <p class="font-['JetBrains_Mono',monospace] text-[10px] font-medium tracking-[-0.04em] text-slate-400 uppercase mb-4">
+
+            Trust
+
+          </p>
+
+          <div class="flex flex-col gap-3 text-sm text-slate-500 font-light">
+
+            <a href="#privacy" class="hover:text-blue-600 transition-colors">
+
+              Privacy controls
+
+            </a>
+
+            <a href="#privacy" class="hover:text-blue-600 transition-colors">
+
+              Controlled memory
+
+            </a>
+
+            <a href="#privacy" class="hover:text-blue-600 transition-colors">
+
+              Reset anytime
+
+            </a>
+
+            <a href="#faq" class="hover:text-blue-600 transition-colors">
+
+              FAQ
+
+            </a>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Bottom Row -->
+
+    <div class="mt-12 pt-6 border-t border-slate-200/70 flex flex-col md:flex-row items-center justify-between gap-4">
+
+      <p class="text-xs text-slate-400 font-light">
+
+        © 2026 AURA. All rights reserved.
+
+      </p>
+
+      <div class="flex items-center gap-4 text-xs text-slate-400 font-light">
+
+        <a href="#" class="hover:text-blue-600 transition-colors">
+
+          Terms
+
+        </a>
+
+        <span class="w-1 h-1 rounded-full bg-slate-300"></span>
+
+        <a href="#" class="hover:text-blue-600 transition-colors">
+
+          Privacy
+
+        </a>
+
+        <span class="w-1 h-1 rounded-full bg-slate-300"></span>
+
+        <a href="#" class="hover:text-blue-600 transition-colors">
+
+          Contact
+
+        </a>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</footer>
+</main>
+
+  
+<!-- =========================================================
+     Pricing Toggle Script
+========================================================== -->
+<script>
+  function togglePricing() {
+    const checkbox = document.getElementById('toggle-checkbox');
+    const pill = document.getElementById('toggle-pill');
+    const labelMo = document.getElementById('label-mo');
+    const labelYr = document.getElementById('label-yr');
+    const prices = document.querySelectorAll('.price-val');
+
+    if (!checkbox || !pill || !labelMo || !labelYr || !prices.length) return;
+
+    const isYearly = checkbox.checked;
+
+    if (isYearly) {
+      pill.style.transform = 'translateX(100%)';
+
+      labelMo.classList.remove('text-slate-800');
+      labelMo.classList.add('text-slate-400');
+
+      labelYr.classList.remove('text-slate-400');
+      labelYr.classList.add('text-slate-800');
+    } else {
+      pill.style.transform = 'translateX(0)';
+
+      labelMo.classList.remove('text-slate-400');
+      labelMo.classList.add('text-slate-800');
+
+      labelYr.classList.remove('text-slate-800');
+      labelYr.classList.add('text-slate-400');
+    }
+
+    prices.forEach(el => {
+      const targetPrice = isYearly ? el.dataset.yearly : el.dataset.monthly;
+      const end = parseInt(targetPrice, 10);
+      let start = parseInt(el.textContent.trim(), 10);
+
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start === end) {
+        el.textContent = targetPrice;
+        return;
+      }
+
+      const duration = 260;
+      const distance = Math.abs(end - start);
+      const stepTime = Math.max(6, Math.floor(duration / distance));
+
+      const timer = setInterval(() => {
+        start = start < end ? start + 1 : start - 1;
+        el.textContent = start;
+
+        if (start === end) {
+          clearInterval(timer);
+        }
+      }, stepTime);
+    });
+  }
+</script>
+
+
+
+
+<script data-img-fallback-handler>!function(){var f=["https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/917d6f93-fb36-439a-8c48-884b67b35381_1600w.jpg","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/4734259a-bad7-422f-981e-ce01e79184f2_1600w.jpg","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/c543a9e1-f226-4ced-80b0-feb8445a75b9_1600w.jpg","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/5bab247f-35d9-400d-a82b-fd87cfe913d2_1600w.webp","https://hoirqrkdgbmvpwutwuwj.supabase.co/storage/v1/object/public/assets/assets/30104e3c-5eea-4b93-93e9-5313698a7156_1600w.webp"],h=new Set;function g(s){for(var x=0,i=0;i<s.length;i++)x=(x<<5)-x+s.charCodeAt(i)|0;return f[Math.abs(x)%f.length]}function r(t){var s=t.src;if(s&&!h.has(s)){h.add(s);t.src=g(s)}}window.addEventListener("error",function(e){var t=e.target;if(t&&t.tagName==="IMG")r(t)},!0);function c(){document.querySelectorAll("img").forEach(function(i){if(i.complete&&!i.naturalWidth&&i.src)r(i)})}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",c);else c()}()</script></body></html>

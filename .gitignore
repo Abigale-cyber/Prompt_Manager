@@ -1,0 +1,5 @@
+node_modules/
+dist/
+tools/prompt-manager-mac/build/
+.DS_Store
+*.log

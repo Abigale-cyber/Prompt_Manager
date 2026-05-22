@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const source = fs.readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+
+assert.match(source, /const \[aiRewriteInput, setAiRewriteInput\] = useState\(''\);/);
+assert.match(source, /const rewriteTemplateWithAI = async \(\) =>/);
+assert.match(source, /chat\/completions/);
+assert.match(source, /Prompt 优化大师/);
+assert.match(source, /不要在字段值里添加“用户输入：”“选题来源：”/);
+assert.match(source, /原始输入材料：\\n\$\{brief\}/);
+assert.match(source, /setTemplateValues\(prev => \(\{ \.\.\.prev, \.\.\.nextValues \}\)\)/);
+assert.match(source, /const \[rewriteHistory, setRewriteHistory\] = useState<Record<string, string>\[\]>\(\[\]\);/);
+assert.match(source, /const \[rewriteHistoryIndex, setRewriteHistoryIndex\] = useState\(-1\);/);
+assert.match(source, /const nextHistory = \[\.\.\.baseHistory, nextValues\];/);
+assert.match(source, /setTemplateValues\(prev => \(\{ \.\.\.prev, \.\.\.rewriteHistory\[nextIndex\] \}\)\)/);
+assert.match(source, />AI改写</);
+assert.match(source, /placeholder="输入几个关键词或几句话，AI 会改写成下面字段"/);
+assert.match(source, /top-8 z-\[60\]/);
+assert.doesNotMatch(source, /bottom-8 z-\[60\]/);
+assert.match(source, /minWidth: 148/);
+assert.match(source, /whiteSpace: 'nowrap'/);
+assert.match(source, /flexShrink: 0/);
+assert.match(source, /aiRewriting \? '改写中\.\.\.' : 'AI填入字段'/);
+assert.match(source, /const undoLastCall = \(\) =>/);
+assert.match(source, /showToast\('已恢复上一次 AI 改写'\)/);
+assert.doesNotMatch(source, /messageHandlers\?\.undoPrompt/);
+assert.match(source, /上一次调用/);
+assert.match(source, /<Send className="w-3\.5 h-3\.5" \/>调用/);
+assert.match(source, /webkit\.messageHandlers\.usePrompt\.postMessage/);
+assert.doesNotMatch(source, /已调用 \$\{provider\} · \$\{model\}/);
+assert.doesNotMatch(source, /生成并复制/);

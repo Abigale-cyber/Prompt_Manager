@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const source = fs.readFileSync(new URL('./Sources/main.swift', import.meta.url), 'utf8');
+
+assert.match(source, /private var lastTargetApp: NSRunningApplication\?/);
+assert.match(source, /installActivationObserver\(\)/);
+assert.match(source, /requestAccessibilityPermission\(\)/);
+assert.match(source, /setupMainMenu\(\)/);
+assert.match(source, /let editMenu = NSMenu\(title: "Edit"\)/);
+assert.match(source, /NSMenuItem\(title: "Paste", action: #selector\(NSText\.paste\(_:\)\), keyEquivalent: "v"\)/);
+assert.match(source, /final class PromptEditingWebView: WKWebView/);
+assert.match(source, /override func performKeyEquivalent\(with event: NSEvent\) -> Bool/);
+assert.match(source, /case kVK_ANSI_V:\n\s+action = #selector\(NSText\.paste\(_:\)\)/);
+assert.match(source, /self\.webView = PromptEditingWebView\(frame: \.zero, configuration: configuration\)/);
+assert.match(source, /sourceAppForPromptWindow = currentTargetApp\(\)/);
+assert.match(source, /let targetApp = sourceApp \?\? currentTargetApp\(\)/);
+assert.match(source, /pastePromptIntoTargetApp\(targetApp, attempt: 0, shortcut: \.paste\)/);
+assert.match(source, /private func pastePromptIntoTargetApp\(_ targetApp: NSRunningApplication, attempt: Int, shortcut: TargetShortcut\)/);
+assert.match(source, /private func insertPrompt\(_ prompt: String, intoFocusedElementOf app: NSRunningApplication\) -> Bool/);
+assert.match(source, /private func insertPrompt\(_ prompt: String, into focusedElement: AXUIElement\) -> Bool/);
+assert.match(source, /if insertPrompt\(pendingPromptText, intoFocusedElementOf: targetApp\) \{/);
+assert.match(source, /AXUIElementSetAttributeValue\(focusedElement, kAXValueAttribute as CFString, nextValue as CFTypeRef\)/);
+assert.match(source, /if NSWorkspace\.shared\.frontmostApplication\?\.processIdentifier != targetApp\.processIdentifier,/);
+assert.match(source, /DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.12\)/);
+assert.match(source, /private func postPasteShortcut\(\) -> Bool/);
+assert.match(source, /private enum TargetShortcut/);
+assert.match(source, /keyDown\.post\(tap: \.cghidEventTap\)/);
+assert.match(source, /webView\.configuration\.userContentController\.add\(self, name: "importFile"\)/);
+assert.match(source, /func jsString\(_ string: String\) -> String \{\n\s+if let data = try\? JSONEncoder\(\)\.encode\(string\)/);
+assert.doesNotMatch(source, /JSONSerialization\.data\(withJSONObject: string/);
