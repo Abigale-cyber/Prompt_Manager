@@ -237,11 +237,7 @@ export default function App() {
     if (!list) return;
 
     const updateOverflow = () => {
-      const estimatedTabWidth = categories.filter(category => category.visible).reduce((total, category) => {
-        const labelWidth = category.label.length * 14;
-        return total + Math.max(96, labelWidth + 76);
-      }, 0);
-      setTabsOverflowing(estimatedTabWidth > list.clientWidth - 56);
+      setTabsOverflowing(categories.filter(category => category.visible).length > 4);
     };
 
     updateOverflow();
