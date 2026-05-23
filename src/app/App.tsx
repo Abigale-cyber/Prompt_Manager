@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, type MouseEvent, type PointerEvent } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
-import { Search, Sparkles, Code2, Megaphone, ClipboardList, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2 } from 'lucide-react';
+import { Search, Sparkles, Code2, Megaphone, ClipboardList, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp } from 'lucide-react';
 import { buildPromptTemplateRows, createPromptWorkbookBlob } from './promptExcel.js';
 import { extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, normalizeImportedPromptRows, parseCsvRows, tableRowsToObjects } from './promptTemplate.js';
 
@@ -179,6 +179,13 @@ export default function App() {
   const [layout, setLayout] = useState<Layout>(storedState.layout === 'one' ? 'one' : 'two');
   const [calledId, setCalledId] = useState<number | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [draggingCategoryId, setDraggingCategoryId] = useState<string | null>(null);
+  const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
+  const [tabsOverflowing, setTabsOverflowing] = useState(false);
+  const [tabsExpanded, setTabsExpanded] = useState(false);
+  const tabListRef = useRef<HTMLDivElement | null>(null);
+  const draggingCategoryIdRef = useRef<string | null>(null);
+  const suppressCategoryClickRef = useRef(false);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [addPromptOpen, setAddPromptOpen] = useState(false);
@@ -224,6 +231,33 @@ export default function App() {
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [categories, prompts, layout, aiEnabled, provider, model, apiKey, baseUrl]);
+
+  useEffect(() => {
+    const list = tabListRef.current;
+    if (!list) return;
+
+    const updateOverflow = () => {
+      const estimatedTabWidth = categories.filter(category => category.visible).reduce((total, category) => {
+        const labelWidth = category.label.length * 14;
+        return total + Math.max(96, labelWidth + 76);
+      }, 0);
+      setTabsOverflowing(estimatedTabWidth > list.clientWidth - 56);
+    };
+
+    updateOverflow();
+    window.addEventListener('resize', updateOverflow);
+    const ResizeObserverCtor = window.ResizeObserver;
+    const observer = ResizeObserverCtor ? new ResizeObserverCtor(updateOverflow) : null;
+    observer?.observe(list);
+    return () => {
+      window.removeEventListener('resize', updateOverflow);
+      observer?.disconnect();
+    };
+  }, [categories]);
+
+  useEffect(() => {
+    if (!tabsOverflowing) setTabsExpanded(false);
+  }, [tabsOverflowing]);
 
   useEffect(() => {
     const onExportResult = (event: Event) => {
@@ -567,6 +601,63 @@ export default function App() {
     setPrompts(prev => { const n = { ...prev }; delete n[id]; return n; });
   };
 
+  const reorderCategories = (sourceId: string, targetId: string) => {
+    if (sourceId === targetId) return;
+    setCategories(prev => {
+      const sourceIndex = prev.findIndex(category => category.id === sourceId);
+      const targetIndex = prev.findIndex(category => category.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+    setActiveTab(sourceId);
+    showToast('分类顺序已更新');
+  };
+
+  const getCategoryIdAtPoint = (x: number, y: number) => {
+    const target = document.elementFromPoint(x, y);
+    if (!(target instanceof HTMLElement)) return null;
+    return target.closest<HTMLElement>('[data-category-tab-id]')?.dataset.categoryTabId || null;
+  };
+
+  const clearCategoryDrag = () => {
+    draggingCategoryIdRef.current = null;
+    setDraggingCategoryId(null);
+    setDragOverCategoryId(null);
+  };
+
+  const handleCategoryPointerDown = (event: PointerEvent<HTMLButtonElement>, categoryId: string) => {
+    if (event.button !== 0) return;
+    draggingCategoryIdRef.current = categoryId;
+    setDraggingCategoryId(categoryId);
+    setDragOverCategoryId(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleCategoryPointerMove = (event: PointerEvent<HTMLButtonElement>) => {
+    const sourceId = draggingCategoryIdRef.current;
+    if (!sourceId) return;
+    const targetId = getCategoryIdAtPoint(event.clientX, event.clientY);
+    setDragOverCategoryId(targetId && targetId !== sourceId ? targetId : null);
+    if (targetId && targetId !== sourceId) suppressCategoryClickRef.current = true;
+  };
+
+  const handleCategoryPointerUp = (event: PointerEvent<HTMLButtonElement>) => {
+    const sourceId = draggingCategoryIdRef.current;
+    const targetId = getCategoryIdAtPoint(event.clientX, event.clientY);
+    if (sourceId && targetId && sourceId !== targetId) reorderCategories(sourceId, targetId);
+    clearCategoryDrag();
+  };
+
+  const handleCategoryClickCapture = (event: MouseEvent<HTMLButtonElement>) => {
+    if (!suppressCategoryClickRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    suppressCategoryClickRef.current = false;
+  };
+
   const list = (prompts[activeTab] || []).filter(prompt => prompt.enabled !== false);
   const filteredPrompts = list.filter(p =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -574,6 +665,7 @@ export default function App() {
     p.prompt.toLowerCase().includes(searchQuery.toLowerCase())
   );
   const visibleCats = categories.filter(c => c.visible);
+  const displayCats = tabsOverflowing && !tabsExpanded ? visibleCats.slice(0, 4) : visibleCats;
   const isLauncherMode = typeof window !== 'undefined' && (
     new URLSearchParams(window.location.search).get('mode') === 'launcher' ||
     window.location.hash === '#launcher' ||
@@ -726,7 +818,7 @@ export default function App() {
       <div className="relative z-10 flex flex-col size-full">
         {/* Nav */}
         <div className="px-6 pt-4 pb-2 sticky top-0 z-40">
-          <nav className="mx-auto max-w-[1100px] flex items-center justify-between rounded-full border px-3 py-2 pl-5"
+          <nav className="mx-auto max-w-[1100px] flex items-center justify-between rounded-2xl border px-3 py-2 pl-5"
             style={{ background: 'rgba(255,255,255,0.78)', backdropFilter: 'blur(16px)',
               WebkitBackdropFilter: 'blur(16px)', borderColor: 'rgba(255,255,255,0.9)',
               boxShadow: '0 4px 24px rgba(15,23,42,0.06)' }}>
@@ -764,36 +856,63 @@ export default function App() {
         {/* Main */}
         <div className="flex-1 max-w-[1100px] w-full mx-auto px-6 pt-6 pb-16">
           <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
-            <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
-              <div className="w-fit max-w-full flex flex-col gap-3">
-                <Tabs.List className="inline-flex p-1 rounded-full border flex-wrap"
+            <div className="flex flex-col mb-5 gap-3">
+              <div className="relative">
+              <Tabs.List ref={tabListRef}
+                  className={`flex w-full rounded-2xl border ${tabsExpanded ? 'flex-wrap overflow-visible' : 'flex-nowrap overflow-hidden'}`}
                   style={{ background: 'rgba(255,255,255,0.7)', borderColor: '#e2e8f0',
-                    boxShadow: '0 4px 14px rgba(15,23,42,0.04)' }}>
-                  {visibleCats.map((cat) => {
-                    const Icon = cat.icon;
-                    const active = activeTab === cat.id;
-                    const count = (prompts[cat.id] || []).length;
-                    return (
-                      <Tabs.Trigger key={cat.id} value={cat.id}
-                        className="inline-flex items-center gap-2 rounded-full transition-all"
-                        style={{ padding: '8px 16px', fontSize: 13, fontWeight: 500,
-                          color: active ? '#fff' : '#475569',
-                          background: active ? '#0f172a' : 'transparent',
-                          boxShadow: active ? '0 4px 14px rgba(15,23,42,0.2)' : 'none' }}>
-                        <Icon className="w-3.5 h-3.5" />
-                        {cat.label}
-                        <span className="rounded-full px-1.5"
-                          style={{ fontSize: 11,
-                            background: active ? 'rgba(255,255,255,0.18)' : '#eef2ff',
-                            color: active ? '#fff' : '#3b63ff' }}>
-                          {count}
-                        </span>
-                      </Tabs.Trigger>
-                    );
-                  })}
-                </Tabs.List>
+                    boxShadow: '0 4px 14px rgba(15,23,42,0.04)',
+                    padding: tabsOverflowing ? '4px 56px 4px 4px' : 4 }}>
+                {displayCats.map((cat) => {
+                  const Icon = cat.icon;
+                  const active = activeTab === cat.id;
+                  const count = (prompts[cat.id] || []).length;
+                  return (
+                    <Tabs.Trigger key={cat.id} value={cat.id}
+                      data-category-tab-id={cat.id}
+                      onPointerDown={(event) => handleCategoryPointerDown(event, cat.id)}
+                      onPointerMove={handleCategoryPointerMove}
+                      onPointerUp={handleCategoryPointerUp}
+                      onPointerCancel={clearCategoryDrag}
+                      onClickCapture={handleCategoryClickCapture}
+                      title="拖动可调整分类位置"
+                      className="inline-flex shrink-0 items-center gap-2 rounded-full transition-all cursor-grab active:cursor-grabbing select-none"
+                      style={{ padding: '8px 16px', fontSize: 13, fontWeight: 500,
+                        color: active ? '#fff' : '#475569',
+                        background: active ? '#0f172a' : 'transparent',
+                        boxShadow: active ? '0 4px 14px rgba(15,23,42,0.2)' : 'none',
+                        opacity: draggingCategoryId === cat.id ? 0.55 : 1,
+                        outline: dragOverCategoryId === cat.id ? '2px solid #3b63ff' : 'none',
+                        outlineOffset: 2 }}>
+                      <Icon className="w-3.5 h-3.5" />
+                      {cat.label}
+                      <span className="rounded-full px-1.5"
+                        style={{ fontSize: 11,
+                          background: active ? 'rgba(255,255,255,0.18)' : '#eef2ff',
+                          color: active ? '#fff' : '#3b63ff' }}>
+                        {count}
+                      </span>
+                    </Tabs.Trigger>
+                  );
+                })}
+              </Tabs.List>
+              {tabsOverflowing && (
+                <>
+                  <button type="button"
+                    onClick={() => setTabsExpanded(value => !value)}
+                    className="absolute right-3 top-3 z-10 grid place-items-center rounded-full transition-all active:scale-95"
+                    style={{ width: 32, height: 32, color: '#0f172a', background: 'transparent' }}
+                    title={tabsExpanded ? '收起分类' : '显示更多分类'}>
+                    {tabsExpanded
+                      ? <ChevronUp className="w-5 h-5" strokeWidth={2.4} />
+                      : <ChevronDown className="w-5 h-5" strokeWidth={2.4} />}
+                  </button>
+                </>
+              )}
+              </div>
 
-                <div className="relative rounded-full border"
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                <div className="relative rounded-2xl border"
                   style={{ background: 'rgba(255,255,255,0.9)', borderColor: '#e2e8f0',
                     boxShadow: '0 4px 20px rgba(15,23,42,0.04)' }}>
                   <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: '#94a3b8' }} />
@@ -802,33 +921,33 @@ export default function App() {
                     className="w-full bg-transparent focus:outline-none"
                     style={{ padding: '12px 20px 12px 48px', fontSize: 14, color: '#0f172a' }} />
                 </div>
-              </div>
 
-              <div className="flex items-center gap-2">
-                <button onClick={openAddPrompt}
-                  className="grid place-items-center rounded-full transition-all active:scale-95 hover:-translate-y-0.5"
-                  style={{ width: 36, height: 36, color: '#fff',
-                    background: 'linear-gradient(135deg,#3b63ff,#6366f1)',
-                    boxShadow: '0 4px 14px rgba(59,99,255,0.32)' }}
-                  title="新增 Prompt">
-                  <Plus className="w-4 h-4" />
-                </button>
-                <div className="inline-flex p-1 rounded-full border"
-                  style={{ background: 'rgba(255,255,255,0.7)', borderColor: '#e2e8f0' }}>
-                  <button onClick={() => setLayout('one')}
-                    className="rounded-full transition-all grid place-items-center"
-                    style={{ width: 32, height: 32,
-                      background: layout === 'one' ? '#0f172a' : 'transparent',
-                      color: layout === 'one' ? '#fff' : '#64748b' }} title="单列">
-                    <Rows3 className="w-4 h-4" />
+                <div className="flex items-center gap-2">
+                  <button onClick={openAddPrompt}
+                    className="grid place-items-center rounded-full transition-all active:scale-95 hover:-translate-y-0.5"
+                    style={{ width: 36, height: 36, color: '#fff',
+                      background: 'linear-gradient(135deg,#3b63ff,#6366f1)',
+                      boxShadow: '0 4px 14px rgba(59,99,255,0.32)' }}
+                    title="新增 Prompt">
+                    <Plus className="w-4 h-4" />
                   </button>
-                  <button onClick={() => setLayout('two')}
-                    className="rounded-full transition-all grid place-items-center"
-                    style={{ width: 32, height: 32,
-                      background: layout === 'two' ? '#0f172a' : 'transparent',
-                      color: layout === 'two' ? '#fff' : '#64748b' }} title="双列">
-                    <Columns2 className="w-4 h-4" />
-                  </button>
+                  <div className="inline-flex p-1 rounded-2xl border"
+                    style={{ background: 'rgba(255,255,255,0.7)', borderColor: '#e2e8f0' }}>
+                    <button onClick={() => setLayout('one')}
+                      className="rounded-full transition-all grid place-items-center"
+                      style={{ width: 32, height: 32,
+                        background: layout === 'one' ? '#0f172a' : 'transparent',
+                        color: layout === 'one' ? '#fff' : '#64748b' }} title="单列">
+                      <Rows3 className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => setLayout('two')}
+                      className="rounded-full transition-all grid place-items-center"
+                      style={{ width: 32, height: 32,
+                        background: layout === 'two' ? '#0f172a' : 'transparent',
+                        color: layout === 'two' ? '#fff' : '#64748b' }} title="双列">
+                      <Columns2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1021,8 +1140,9 @@ export default function App() {
                       disabled={aiRewriting}
                       className="inline-flex items-center justify-center gap-1.5 rounded-full text-white transition-all disabled:opacity-80"
                       style={{ height: 34, padding: '0 14px', minWidth: 148, fontSize: 12, lineHeight: '16px', whiteSpace: 'nowrap', background: 'linear-gradient(135deg,#3b63ff,#6366f1)' }}>
-                      <Sparkles className="w-3.5 h-3.5" style={{ flexShrink: 0 }} />
-                      <span>{aiRewriting ? '改写中...' : 'AI填入字段'}</span>
+                      {aiRewriting
+                        ? <span>改写中...</span>
+                        : <><Sparkles className="w-3.5 h-3.5" style={{ flexShrink: 0 }} /><span>AI填入字段</span></>}
                     </button>
                   </div>
                   <textarea
