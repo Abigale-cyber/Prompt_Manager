@@ -89,7 +89,7 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         window.center()
         window.isFloatingPanel = true
         window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.isRestorable = false
@@ -744,7 +744,7 @@ final class PromptReactLauncherController: NSWindowController, WKScriptMessageHa
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
 
         super.init(window: panel)
@@ -980,7 +980,7 @@ final class PromptLauncherController: NSWindowController, NSTableViewDataSource,
         )
         panel.isFloatingPanel = true
         panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
@@ -1289,7 +1289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activationObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         setupMainMenu()
         setupStatusItem()
         launcherController.onSelect = { [weak self] item, sourceApp in

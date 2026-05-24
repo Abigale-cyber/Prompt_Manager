@@ -16,6 +16,8 @@ const builderSource = fs.readFileSync(builderConfig, 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
 
 assert.match(buildSource, /run\(\['run', 'build'\]\)/);
+assert.match(buildSource, /shell:\s*process\.platform === 'win32'/);
+assert.match(buildSource, /result\.error/);
 assert.match(buildSource, /CSC_IDENTITY_AUTO_DISCOVERY/);
 assert.match(buildSource, /tools\/prompt-manager-windows\/electron-builder\.yml/);
 assert.equal(packageJson.devDependencies.electron, '33.4.11');
