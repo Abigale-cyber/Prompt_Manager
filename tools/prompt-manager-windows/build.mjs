@@ -39,6 +39,8 @@ run(
     '--win',
     'nsis',
     '--x64',
+    '--publish',
+    'never',
     '--config',
     'tools/prompt-manager-windows/electron-builder.yml',
   ],

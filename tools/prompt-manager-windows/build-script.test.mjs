@@ -19,6 +19,7 @@ assert.match(buildSource, /run\(\['run', 'build'\]\)/);
 assert.match(buildSource, /shell:\s*process\.platform === 'win32'/);
 assert.match(buildSource, /result\.error/);
 assert.match(buildSource, /CSC_IDENTITY_AUTO_DISCOVERY/);
+assert.match(buildSource, /'--publish',\n\s+'never'/);
 assert.match(buildSource, /tools\/prompt-manager-windows\/electron-builder\.yml/);
 assert.equal(packageJson.devDependencies.electron, '33.4.11');
 assert.equal(packageJson.devDependencies['electron-builder'], '25.1.8');
