@@ -1,63 +1,45 @@
-# Prompt Management Tool
+# Prompt Manager
 
-本地 Prompt 管理小工具雏形。当前主方向是 Swift/AppKit 原生 Mac 壳 + Figma 导出的 React UI，不依赖 Tauri，也不需要 Rust。
+Prompt Manager 是一个本地 Prompt 管理工具。它可以把常用 Prompt 按分类保存起来，在当前软件上方悬浮打开，填写变量后复制或自动粘贴到正在使用的输入框。
 
-## 当前能力
+## 下载安装
 
-- Prompt 分类、搜索、列表展示
-- 新增、编辑、删除 Prompt
-- 点击调用时复制 Prompt，并记录使用次数
-- 使用 WebView `localStorage` 本地保存数据
-- 菜单栏入口
-- 全局快捷键 `⌥Space` 在当前 App 上方浮出完整 Prompt 管理器界面
-- 弹出时优先避开当前聚焦输入框，尽量放到输入框上方或下方
-- 会记住用户手动调整后的窗口大小和位置
-- 默认浮窗尺寸为 `640 x 460`，并优先靠右显示
-- 调用 Prompt 后复制到剪贴板，并尝试切回原 App 自动粘贴
-- 启动后显示在程序坞，同时保留菜单栏入口
+安装包由 GitHub Actions 自动构建：
 
-`⌥Space` 是 macOS 标准全局快捷键。只复制 Prompt 不需要额外权限；如果要自动粘贴到其他 App 的输入框，需要给 App 开启辅助功能权限。
+1. 打开仓库顶部的 **Actions**。
+2. 进入最新成功的 **Build Installers** 工作流。
+3. 在页面底部 **Artifacts** 下载对应安装包。
 
-## 运行 Mac 小工具
+可下载的安装包：
 
-```bash
-tools/prompt-manager-mac/build.sh
-open tools/prompt-manager-mac/build/PromptManager.app
-```
+- **Mac**：`PromptManager-macOS`，里面包含 `PromptManager-0.0.1.dmg`
+- **Windows**：`PromptManager-Windows`，里面包含 `PromptManager-0.0.1-x64.exe`
 
-`build.sh` 会先执行 `npm run build`，再把 `dist/` 里的 React 页面打包进 `.app` 的 `Contents/Resources/web/`。
+## Mac 安装
 
-生成的 App：
+1. 下载并解压 `PromptManager-macOS`。
+2. 打开 `PromptManager-0.0.1.dmg`。
+3. 把 `PromptManager.app` 拖到 `Applications`。
+4. 从 `Applications` 启动 `PromptManager.app`。
 
-```text
-tools/prompt-manager-mac/build/PromptManager.app
-```
+当前 DMG 未做 Apple Developer ID 公证。第一次打开时，如果 macOS 提示无法验证开发者，右键点击 `PromptManager.app`，选择“打开”，再确认一次。
 
-## 打包测试版 DMG
+## Windows 安装
 
-发给少量用户测试时，可以生成未公证的 DMG：
+1. 下载并解压 `PromptManager-Windows`。
+2. 运行 `PromptManager-0.0.1-x64.exe`。
+3. 按安装向导完成安装。
+4. 从开始菜单或桌面快捷方式启动 `Prompt Manager`。
 
-```bash
-tools/prompt-manager-mac/build-dmg.sh
-```
+## 使用方法
 
-生成文件：
+- 点击 `+` 新增 Prompt，按分类保存常用内容。
+- Prompt 中可以使用 `{{字段名}}` 标记调用前需要填写的变量。
+- 点击“调用”后，先填写变量，再把生成后的 Prompt 复制或发送到当前软件。
+- 在设置里配置模型 API Key 后，可以用“AI填入字段”把关键词改写成字段内容。
+- “上一次调用”会恢复同一个 Prompt 最近一次 AI 填入的字段值。
+- Mac 端可以使用 `⌥Space` 在当前软件上方唤出工具。
 
-```text
-tools/prompt-manager-mac/dist/PromptManager-0.0.1.dmg
-```
+## 本地数据
 
-DMG 内包含 `PromptManager.app` 和 `Applications` 快捷入口。用户打开 DMG 后，把 App 拖到 `Applications` 即可。
-
-这个 DMG 没有 Apple Developer ID 公证。第一次打开时，macOS 可能提示无法验证开发者；测试用户需要右键点击 App，选择“打开”，再确认一次。
-
-## 前端原型预览
-
-React/Vite 页面仍保留为视觉原型参考：
-
-```bash
-npm install
-npm run dev
-```
-
-访问 `http://127.0.0.1:1420/`。
+数据保存在本机浏览器存储中，不会上传到服务器。更换电脑或清理浏览器数据前，可以先用“导出 Excel”备份，再用“导入”恢复。

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, type MouseEvent, type PointerEvent } from 
 import * as Tabs from '@radix-ui/react-tabs';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
-import { Search, Sparkles, Code2, Megaphone, ClipboardList, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Search, Sparkles, Megaphone, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp } from 'lucide-react';
 import { buildPromptTemplateRows, createPromptWorkbookBlob } from './promptExcel.js';
 import { extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, moveItemById, normalizeImportedPromptRows, parseCsvRows, tableRowsToObjects } from './promptTemplate.js';
 import appIconUrl from '../../tools/prompt-manager-mac/Assets/PromptManager.svg';
@@ -60,39 +60,18 @@ type NativeAIResult = {
 };
 
 const initialCategories: Category[] = [
-  { id: 'coding', label: 'Coding', icon: Code2, visible: true },
-  { id: 'media',  label: '自媒体', icon: Megaphone, visible: true },
-  { id: 'pm',     label: 'PM',     icon: ClipboardList, visible: true },
+  { id: 'media',     label: '自媒体', icon: Megaphone, visible: true },
+  { id: 'knowledge', label: '知识库', icon: Folder, visible: true },
 ];
 
 const initialPrompts: Record<string, Prompt[]> = {
-  coding: [
-    { id: 1, title: "代码重构助手", description: "帮助重构代码，提升代码质量和可维护性",
-      prompt: "请帮我重构以下代码，要求：1. 提升可读性 2. 优化性能 3. 遵循最佳实践\n\n代码：\n[在此粘贴代码]" },
-    { id: 2, title: "Bug 调试专家", description: "快速定位和修复代码中的问题",
-      prompt: "我遇到了一个 bug，请帮我分析原因并提供解决方案：\n\n问题描述：[描述问题]\n错误信息：[粘贴错误]\n相关代码：[粘贴代码]" },
-    { id: 3, title: "API 文档生成", description: "自动生成清晰的 API 文档",
-      prompt: "请为以下 API 生成详细的文档，包括：参数说明、返回值、示例代码、注意事项\n\nAPI 代码：\n[粘贴 API 代码]" },
-    { id: 4, title: "单元测试编写", description: "生成全面的单元测试用例",
-      prompt: "请为以下函数/组件编写完整的单元测试，覆盖边界情况和异常场景：\n\n代码：\n[粘贴代码]" },
-  ],
   media: [
-    { id: 5, title: "小红书爆款标题", description: "生成吸引人的小红书标题",
-      prompt: "请为以下内容生成 10 个小红书风格的标题，要求：\n1. 包含emoji\n2. 激发好奇心\n3. 突出价值点\n\n内容主题：[描述主题]" },
-    { id: 6, title: "视频脚本创作", description: "创作短视频脚本和分镜",
-      prompt: "请为以下主题创作一个 60 秒短视频脚本，包括：\n1. 开场吸引\n2. 内容展开\n3. 行动号召\n\n主题：[输入主题]" },
-    { id: 7, title: "公众号推文优化", description: "优化公众号文章，提升阅读体验",
-      prompt: "请优化以下公众号文章，要求：\n1. 提升标题吸引力\n2. 优化段落结构\n3. 增加金句\n4. 调整语气更亲和\n\n原文：\n[粘贴原文]" },
+    { id: 1, title: "短视频选题", description: "根据主题生成简单的内容选题",
+      prompt: "请围绕主题「{{主题}}」生成 5 个适合自媒体发布的选题，每个选题用一句话说明亮点。" },
   ],
-  pm: [
-    { id: 8, title: "需求文档生成", description: "快速生成规范的 PRD 文档",
-      prompt: "请根据以下信息生成产品需求文档(PRD)：\n\n产品概述：[描述产品]\n目标用户：[用户画像]\n核心功能：[列出功能]\n\n请包含：背景、目标、用户故事、功能清单、交互说明" },
-    { id: 9, title: "用户故事拆解", description: "将需求拆解为可执行的用户故事",
-      prompt: "请将以下需求拆解为用户故事，使用格式：作为[角色]，我想要[功能]，以便[价值]\n\n需求描述：[输入需求]" },
-    { id: 10, title: "竞品分析报告", description: "生成结构化的竞品分析",
-      prompt: "请对以下产品进行竞品分析：\n\n我的产品：[产品描述]\n竞品：[竞品名称]\n\n请从以下维度分析：\n1. 核心功能对比\n2. 用户体验\n3. 商业模式\n4. 优劣势\n5. 差异化机会" },
-    { id: 11, title: "功能优先级评估", description: "使用 RICE 模型评估功能优先级",
-      prompt: "请使用 RICE 模型（Reach, Impact, Confidence, Effort）评估以下功能的优先级：\n\n功能列表：\n[列出功能]" },
+  knowledge: [
+    { id: 2, title: "知识库整理", description: "把零散资料整理成知识库条目",
+      prompt: "请把以下资料整理成知识库条目，包含标题、摘要、关键结论和后续行动：\n\n资料：{{资料}}" },
   ],
 };
 
@@ -144,9 +123,8 @@ const restoreProviderConfigs = (stored: StoredState) => {
 const STORAGE_KEY = 'prompt-management-tool:v1';
 
 const categoryIconFor = (id: string) => {
-  if (id === 'coding') return Code2;
   if (id === 'media') return Megaphone;
-  if (id === 'pm') return ClipboardList;
+  if (id === 'knowledge') return Folder;
   return Folder;
 };
 
@@ -337,7 +315,7 @@ export default function App() {
   const storedState = readStoredState();
   const [categories, setCategories] = useState<Category[]>(() => restoreCategories(storedState.categories));
   const [prompts, setPrompts] = useState<Record<string, Prompt[]>>(() => normalizePrompts(storedState.prompts));
-  const [activeTab, setActiveTab] = useState<string>('coding');
+  const [activeTab, setActiveTab] = useState<string>('media');
   const [searchQuery, setSearchQuery] = useState('');
   const [layout, setLayout] = useState<Layout>(storedState.layout === 'one' ? 'one' : 'two');
   const [calledId, setCalledId] = useState<number | null>(null);
@@ -1426,7 +1404,7 @@ export default function App() {
               <div>
                 <label style={{ fontSize: 11, color: '#64748b' }}>标题</label>
                 <input value={formTitle} onChange={(e) => setFormTitle(e.target.value)}
-                  placeholder="例如：代码重构助手"
+                  placeholder="例如：短视频选题"
                   className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a]"
                   style={{ fontSize: 13, borderColor: '#e2e8f0' }} />
               </div>

@@ -7,6 +7,15 @@ assert.match(source, /import appIconUrl from '..\/..\/tools\/prompt-manager-mac\
 assert.match(source, /<img src=\{appIconUrl\}/);
 assert.match(source, />Prompt Manager<\/div>/);
 assert.doesNotMatch(source, />Prompt 管理器<\/div>/);
+assert.match(source, /const \[activeTab, setActiveTab\] = useState<string>\('media'\);/);
+assert.match(source, /\{ id: 'media',\s+label: '自媒体', icon: Megaphone, visible: true \}/);
+assert.match(source, /\{ id: 'knowledge', label: '知识库', icon: Folder, visible: true \}/);
+assert.doesNotMatch(source, /\{ id: 'coding'/);
+assert.doesNotMatch(source, /\{ id: 'pm'/);
+assert.match(source, /title: "短视频选题"/);
+assert.match(source, /title: "知识库整理"/);
+assert.doesNotMatch(source, /代码重构助手/);
+assert.doesNotMatch(source, /Bug 调试专家/);
 assert.match(source, /const \[aiRewriteInput, setAiRewriteInput\] = useState\(''\);/);
 assert.match(source, /type AIProviderConfig = \{ model: string; apiKey: string; baseUrl: string \};/);
 assert.match(source, /providerConfigs\?: Record<string, AIProviderConfig>;/);
