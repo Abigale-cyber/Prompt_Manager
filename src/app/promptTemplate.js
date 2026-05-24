@@ -6,9 +6,6 @@ const COLUMN_ALIASES = {
   title: ['title', '标题', '名称', 'prompt名称', 'prompt_name'],
   description: ['description', '描述', '简介', '说明'],
   prompt: ['prompt', 'Prompt', 'prompt内容', 'Prompt内容', '正文', '内容'],
-  tags: ['tags', '标签'],
-  outputMode: ['output_mode', 'outputMode', '输出模式', '调用模式'],
-  enabled: ['enabled', '启用', '是否启用'],
 };
 
 export function extractTemplateFields(prompt) {
@@ -64,9 +61,6 @@ export function normalizeImportedPromptRows(rows) {
         title,
         description,
         prompt,
-        tags: splitTags(readColumn(row, 'tags')),
-        outputMode: normalizeOutputMode(readColumn(row, 'outputMode')),
-        enabled: normalizeEnabled(readColumn(row, 'enabled')),
         variables: extractTemplateFields(prompt),
       };
     })
@@ -158,24 +152,6 @@ function readColumn(row, key) {
 
 function normalizeColumnName(name) {
   return String(name || '').replace(/\s|_|-/g, '').toLowerCase();
-}
-
-function splitTags(raw) {
-  return String(raw || '')
-    .split(/[,，]/)
-    .map((tag) => tag.trim())
-    .filter(Boolean);
-}
-
-function normalizeOutputMode(raw) {
-  const value = String(raw || '').trim().toLowerCase();
-  return ['copy', 'insert', 'ai'].includes(value) ? value : 'copy';
-}
-
-function normalizeEnabled(raw) {
-  const value = String(raw || '').trim().toLowerCase();
-  if (!value) return true;
-  return !['false', '0', 'no', 'n', '否', '不启用', '停用'].includes(value);
 }
 
 function createCategoryId(label, usedIds) {

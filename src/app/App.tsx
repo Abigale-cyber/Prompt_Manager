@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, type MouseEvent, type PointerEvent } from 
 import * as Tabs from '@radix-ui/react-tabs';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
-import { Search, Sparkles, Megaphone, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp } from 'lucide-react';
-import { buildPromptTemplateRows, createPromptWorkbookBlob } from './promptExcel.js';
+import { Search, Sparkles, Megaphone, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp, FileText, History } from 'lucide-react';
+import { buildPromptHistoryRows, buildPromptTemplateRows, createPromptWorkbookBlob } from './promptExcel.js';
 import { extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, moveItemById, normalizeImportedPromptRows, parseCsvRows, tableRowsToObjects } from './promptTemplate.js';
 import appIconUrl from '../../tools/prompt-manager-mac/Assets/PromptManager.svg';
 
@@ -41,9 +41,6 @@ type ImportedPrompt = {
   title: string;
   description: string;
   prompt: string;
-  tags: string[];
-  outputMode: 'copy' | 'insert' | 'ai';
-  enabled: boolean;
   variables: string[];
 };
 type ChatCompletionPayload = {
@@ -335,6 +332,7 @@ export default function App() {
   const suppressCategoryClickRef = useRef(false);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [addPromptOpen, setAddPromptOpen] = useState(false);
   const [callPromptOpen, setCallPromptOpen] = useState(false);
   const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
@@ -688,10 +686,8 @@ export default function App() {
     };
     input.click();
   };
-  const handleExport = async () => {
-    const rows = buildPromptTemplateRows();
+  const exportRowsAsExcel = async (rows: string[][], filename: string) => {
     const blob = createPromptWorkbookBlob(rows);
-    const filename = `prompt-library-${new Date().toISOString().slice(0, 10)}.xlsx`;
     const webkit = (window as any).webkit;
 
     if (webkit?.messageHandlers?.exportExcel) {
@@ -708,6 +704,21 @@ export default function App() {
     link.click();
     URL.revokeObjectURL(url);
     showToast('已导出 Excel');
+  };
+
+  const handleExportTemplate = async () => {
+    await exportRowsAsExcel(buildPromptTemplateRows(), `prompt-template-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    setExportOpen(false);
+  };
+
+  const handleExportHistory = async () => {
+    const rows = buildPromptHistoryRows(categories, prompts);
+    if (rows.length <= 1) {
+      showToast('没有可导出的历史记录');
+      return;
+    }
+    await exportRowsAsExcel(rows, `prompt-history-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    setExportOpen(false);
   };
 
   const openAddPrompt = () => {
@@ -1132,9 +1143,9 @@ export default function App() {
               <button onClick={handleImport}
                 className="inline-flex items-center rounded-full border transition-all hover:bg-[#f8faff]"
                 style={{ padding: '8px 16px', fontSize: 13, borderColor: '#e2e8f0', color: '#0f172a' }}>
-                导入
+                导入Excel
               </button>
-              <button onClick={handleExport}
+              <button onClick={() => setExportOpen(true)}
                 className="inline-flex items-center rounded-full text-white transition-all hover:-translate-y-0.5"
                 style={{ padding: '8px 18px', fontSize: 13, background: '#0f172a',
                   boxShadow: '0 4px 14px rgba(15,23,42,0.18)' }}>
@@ -1366,6 +1377,56 @@ export default function App() {
           {toast}
         </div>
       )}
+
+      {/* Export Dialog */}
+      <Dialog.Root open={exportOpen} onOpenChange={setExportOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50"
+            style={{ background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(4px)' }} />
+          <Dialog.Content
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[420px] max-w-[92vw] rounded-3xl border"
+            style={{ background: '#fff', borderColor: '#e2e8f0',
+              boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
+            <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b" style={{ borderColor: '#f1f5f9' }}>
+              <Dialog.Title style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>
+                导出 Excel
+              </Dialog.Title>
+              <Dialog.Close className="grid place-items-center rounded-full hover:bg-slate-100"
+                style={{ width: 32, height: 32, color: '#64748b' }}>
+                <X className="w-4 h-4" />
+              </Dialog.Close>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <button onClick={handleExportTemplate}
+                className="w-full rounded-2xl border text-left transition-colors hover:bg-slate-50"
+                style={{ padding: '14px 16px', borderColor: '#e2e8f0' }}>
+                <div className="flex items-start gap-3">
+                  <FileText className="w-4 h-4 shrink-0 mt-0.5" style={{ color: '#3b63ff' }} />
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>导出模板</div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+                      用于填写新的 Prompt 导入表。
+                    </div>
+                  </div>
+                </div>
+              </button>
+              <button onClick={handleExportHistory}
+                className="w-full rounded-2xl border text-left transition-colors hover:bg-slate-50"
+                style={{ padding: '14px 16px', borderColor: '#e2e8f0' }}>
+                <div className="flex items-start gap-3">
+                  <History className="w-4 h-4 shrink-0 mt-0.5" style={{ color: '#3b63ff' }} />
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>导出历史记录</div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>
+                      用于换电脑前备份当前 Prompt 库。
+                    </div>
+                  </div>
+                </div>
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       {/* Add Prompt Dialog */}
       <Dialog.Root open={addPromptOpen} onOpenChange={setAddPromptOpen}>

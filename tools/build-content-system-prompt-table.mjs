@@ -6,7 +6,7 @@ const outputDir = '/Users/Abigale/All_project/20260522promptmanagement/outputs/c
 await fs.mkdir(outputDir, { recursive: true });
 
 const promptRows = [
-  ['分类', '标题', '简介', 'Prompt内容', '标签', '调用模式', '启用'],
+  ['分类', '标题', '简介', 'Prompt内容'],
   [
     '选题',
     'Topic Radar：选题切口评估',
@@ -343,10 +343,11 @@ const detailRows = [
 ];
 
 const workbook = Workbook.create();
+const promptImportRows = promptRows.map((row) => row.slice(0, 4));
 
-function styleSheet(sheet, range, headerRange, widths) {
+function styleSheet(sheet, range, headerRange, widths, values) {
   sheet.showGridLines = false;
-  sheet.getRange(range).values = sheet === main ? promptRows : detailRows;
+  sheet.getRange(range).values = values;
   sheet.freezePanes.freezeRows(1);
   sheet.getRange(headerRange).format.fill.color = '#0F172A';
   sheet.getRange(headerRange).format.font.color = '#FFFFFF';
@@ -364,21 +365,19 @@ function styleSheet(sheet, range, headerRange, widths) {
 }
 
 const main = workbook.worksheets.add('Prompt导入模板');
-styleSheet(main, `A1:G${promptRows.length}`, 'A1:G1', [130, 210, 280, 640, 170, 90, 70]);
-main.getRange('A2:G2').format.rowHeightPx = 160;
-main.getRange(`A3:G${promptRows.length}`).format.rowHeightPx = 210;
-main.getRange(`F2:F${promptRows.length}`).dataValidation = { rule: { type: 'list', values: ['copy', 'insert', 'ai'] } };
-main.getRange(`G2:G${promptRows.length}`).dataValidation = { rule: { type: 'list', values: ['true', 'false', '是', '否'] } };
+styleSheet(main, `A1:D${promptImportRows.length}`, 'A1:D1', [130, 210, 280, 640], promptImportRows);
+main.getRange('A2:D2').format.rowHeightPx = 160;
+main.getRange(`A3:D${promptImportRows.length}`).format.rowHeightPx = 210;
 
 const detail = workbook.worksheets.add('调用梳理');
-styleSheet(detail, `A1:F${detailRows.length}`, 'A1:F1', [110, 230, 330, 210, 360, 310]);
+styleSheet(detail, `A1:F${detailRows.length}`, 'A1:F1', [110, 230, 330, 210, 360, 310], detailRows);
 detail.getRange(`A2:F${detailRows.length}`).format.rowHeightPx = 90;
 
 const summary = workbook.worksheets.add('确认重点');
 summary.showGridLines = false;
 summary.getRange('A1:B8').values = [
   ['项目', '说明'],
-  ['主表用途', 'A-G 列严格符合 Prompt 管理器导入格式，可直接导入。'],
+  ['主表用途', 'A-D 列严格符合 Prompt 管理器导入格式，可直接导入。'],
   ['占位符规则', '所有需要调用前填写的变量均用 {{字段名}} 标记。'],
   ['真实 LLM 调用', 'Topic Research 和 Generate Image 最接近外部模型/API Prompt；其他多数是 Skill 指令或本地模板化生成。'],
   ['建议先确认', 'Case Writer 是否拆成标题、大纲、正文、结尾、审稿多个 Prompt。'],
@@ -400,10 +399,10 @@ summary.getRange('A2:B8').format.rowHeightPx = 58;
 
 const inspect = await workbook.inspect({
   kind: 'table',
-  range: `Prompt导入模板!A1:G${promptRows.length}`,
+  range: `Prompt导入模板!A1:D${promptImportRows.length}`,
   include: 'values',
   tableMaxRows: 6,
-  tableMaxCols: 7,
+  tableMaxCols: 4,
 });
 console.log(inspect.ndjson);
 
@@ -415,7 +414,7 @@ const errors = await workbook.inspect({
 });
 console.log(errors.ndjson);
 
-await workbook.render({ sheetName: 'Prompt导入模板', range: 'A1:G8', scale: 1 });
+await workbook.render({ sheetName: 'Prompt导入模板', range: 'A1:D8', scale: 1 });
 await workbook.render({ sheetName: '调用梳理', range: 'A1:F8', scale: 1 });
 await workbook.render({ sheetName: '确认重点', range: 'A1:B8', scale: 1 });
 
@@ -425,21 +424,21 @@ await output.save(xlsxPath);
 
 const firstWorkbook = Workbook.create();
 const firstSheet = firstWorkbook.worksheets.add('Prompt导入模板');
-const firstRows = [promptRows[0], promptRows[1]];
+const firstRows = [promptImportRows[0], promptImportRows[1]];
 firstSheet.showGridLines = false;
-firstSheet.getRange('A1:G2').values = firstRows;
+firstSheet.getRange('A1:D2').values = firstRows;
 firstSheet.freezePanes.freezeRows(1);
-firstSheet.getRange('A1:G1').format.fill.color = '#0F172A';
-firstSheet.getRange('A1:G1').format.font.color = '#FFFFFF';
-firstSheet.getRange('A1:G1').format.font.bold = true;
-firstSheet.getRange('A1:G2').format.wrapText = true;
-firstSheet.getRange('A1:G2').format.verticalAlignment = 'Top';
-[130, 210, 280, 640, 170, 90, 70].forEach((width, index) => {
+firstSheet.getRange('A1:D1').format.fill.color = '#0F172A';
+firstSheet.getRange('A1:D1').format.font.color = '#FFFFFF';
+firstSheet.getRange('A1:D1').format.font.bold = true;
+firstSheet.getRange('A1:D2').format.wrapText = true;
+firstSheet.getRange('A1:D2').format.verticalAlignment = 'Top';
+[130, 210, 280, 640].forEach((width, index) => {
   const col = String.fromCharCode(65 + index);
   firstSheet.getRange(`${col}:${col}`).format.columnWidthPx = width;
 });
-firstSheet.getRange('A2:G2').format.rowHeightPx = 210;
-await firstWorkbook.render({ sheetName: 'Prompt导入模板', range: 'A1:G2', scale: 1 });
+firstSheet.getRange('A2:D2').format.rowHeightPx = 210;
+await firstWorkbook.render({ sheetName: 'Prompt导入模板', range: 'A1:D2', scale: 1 });
 const firstOutput = await SpreadsheetFile.exportXlsx(firstWorkbook);
 const firstXlsxPath = path.join(outputDir, 'content-system-prompts-first-row.xlsx');
 await firstOutput.save(firstXlsxPath);
@@ -469,37 +468,34 @@ const outlineRow = [
     '7. 软件介绍或教程类选题必须覆盖实际使用路径：安装/入口、初始化、核心操作、典型工作流、权限/边界、维护方法。',
     '8. 必须包含风险提醒，并最后展示核心判断、切入角度、文章大纲摘要，等待确认。',
   ].join('\n'),
-  'content-system,outline,文章大纲,SCQA',
-  'copy',
-  'true',
 ];
 outlineSheet.showGridLines = false;
-outlineSheet.getRange('A1:G2').values = [promptRows[0], outlineRow];
+outlineSheet.getRange('A1:D2').values = [promptImportRows[0], outlineRow];
 outlineSheet.freezePanes.freezeRows(1);
-outlineSheet.getRange('A1:G1').format.fill.color = '#0F172A';
-outlineSheet.getRange('A1:G1').format.font.color = '#FFFFFF';
-outlineSheet.getRange('A1:G1').format.font.bold = true;
-outlineSheet.getRange('A1:G2').format.wrapText = true;
-outlineSheet.getRange('A1:G2').format.verticalAlignment = 'Top';
-[130, 260, 300, 680, 220, 90, 70].forEach((width, index) => {
+outlineSheet.getRange('A1:D1').format.fill.color = '#0F172A';
+outlineSheet.getRange('A1:D1').format.font.color = '#FFFFFF';
+outlineSheet.getRange('A1:D1').format.font.bold = true;
+outlineSheet.getRange('A1:D2').format.wrapText = true;
+outlineSheet.getRange('A1:D2').format.verticalAlignment = 'Top';
+[130, 260, 300, 680].forEach((width, index) => {
   const col = String.fromCharCode(65 + index);
   outlineSheet.getRange(`${col}:${col}`).format.columnWidthPx = width;
 });
-outlineSheet.getRange('A2:G2').format.rowHeightPx = 260;
-await outlineWorkbook.render({ sheetName: 'Prompt导入模板', range: 'A1:G2', scale: 1 });
+outlineSheet.getRange('A2:D2').format.rowHeightPx = 260;
+await outlineWorkbook.render({ sheetName: 'Prompt导入模板', range: 'A1:D2', scale: 1 });
 const outlineOutput = await SpreadsheetFile.exportXlsx(outlineWorkbook);
 const outlineXlsxPath = path.join(outputDir, 'content-system-outline-prompt-import-test.xlsx');
 await outlineOutput.save(outlineXlsxPath);
 
-const markdownRows = promptRows.slice(1).map((row) => {
-  const [category, title, description, prompt, tags, mode, enabled] = row;
-  return `| ${category} | ${title} | ${description} | ${String(prompt).split('\n')[0]}... | ${tags} | ${mode} | ${enabled} |`;
+const markdownRows = promptImportRows.slice(1).map((row) => {
+  const [category, title, description, prompt] = row;
+  return `| ${category} | ${title} | ${description} | ${String(prompt).split('\n')[0]}... |`;
 });
 const markdown = [
   '# Content System Prompt 梳理 v0.1',
   '',
-  '| 分类 | 标题 | 简介 | Prompt内容预览 | 标签 | 调用模式 | 启用 |',
-  '|---|---|---|---|---|---|---|',
+  '| 分类 | 标题 | 简介 | Prompt内容预览 |',
+  '|---|---|---|---|',
   ...markdownRows,
   '',
   '## 初步判断',

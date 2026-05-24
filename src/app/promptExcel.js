@@ -1,27 +1,39 @@
 import { strToU8, zipSync } from 'fflate';
 
-const HEADERS = ['分类', '标题', '简介', 'Prompt内容', '标签', '调用模式', '启用'];
+const HEADERS = ['分类', '标题', '简介', 'Prompt内容'];
 const INSTRUCTION_ROW = [
   '填写所属分类，必填；不存在时导入会自动新建。',
   '填写 Prompt 名称，必填。',
   '一句话说明用途，可选。',
   '填写完整 Prompt，可使用 {{字段名}} 作为调用前需要填写的占位符。',
-  '可选，多个标签用英文逗号分隔。',
-  '可选：copy 表示复制；insert/ai 为预留。',
-  '可选：true/是 启用；false/否 禁用。',
 ];
 const EXAMPLE_ROW = [
   '自媒体',
   '公众号文章优化',
   '根据主题、读者和原文生成优化建议',
   '请优化以下公众号文章。\n\n文章主题：{{文章主题}}\n目标读者：{{目标读者}}\n原文内容：{{原文内容}}\n\n要求：\n1. 优化标题\n2. 调整段落结构\n3. 提炼金句\n4. 保持亲和、清晰的语气',
-  '公众号,润色,文章',
-  'copy',
-  'true',
 ];
 
 export function buildPromptTemplateRows() {
   return [HEADERS, INSTRUCTION_ROW, EXAMPLE_ROW];
+}
+
+export function buildPromptHistoryRows(categories = [], prompts = {}) {
+  const rows = [HEADERS];
+  const knownCategoryIds = new Set();
+
+  (categories || []).forEach((category) => {
+    const categoryId = String(category?.id || '');
+    knownCategoryIds.add(categoryId);
+    appendPromptRows(rows, category?.label || categoryId, prompts?.[categoryId]);
+  });
+
+  Object.entries(prompts || {}).forEach(([categoryId, promptList]) => {
+    if (knownCategoryIds.has(categoryId)) return;
+    appendPromptRows(rows, categoryId, promptList);
+  });
+
+  return rows;
 }
 
 export function createPromptWorkbookBytes(rows) {
@@ -43,12 +55,23 @@ export function createPromptWorkbookBlob(rows) {
   });
 }
 
+function appendPromptRows(rows, categoryLabel, promptList) {
+  (Array.isArray(promptList) ? promptList : []).forEach((prompt) => {
+    rows.push([
+      categoryLabel,
+      prompt?.title || '',
+      prompt?.description || '',
+      prompt?.prompt || '',
+    ]);
+  });
+}
+
 function xmlFile(xml) {
   return strToU8(xml);
 }
 
 function worksheetXml(rows) {
-  const columnWidths = [14, 24, 34, 80, 24, 14, 12];
+  const columnWidths = [14, 24, 34, 80];
   const cols = columnWidths
     .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
     .join('');
@@ -70,7 +93,7 @@ function worksheetXml(rows) {
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <cols>${cols}</cols>
   <sheetData>${sheetData}</sheetData>
-  <autoFilter ref="A1:G${Math.max(rows.length, 1)}"/>
+  <autoFilter ref="A1:D${Math.max(rows.length, 1)}"/>
   <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
   <selection pane="bottomLeft"/>
 </worksheet>`;
