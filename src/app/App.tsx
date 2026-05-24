@@ -34,6 +34,7 @@ type StoredState = {
   apiKey?: string;
   baseUrl?: string;
   providerConfigs?: Record<string, AIProviderConfig>;
+  lastRewriteValues?: Record<string, Record<string, string>>;
 };
 type ImportedPrompt = {
   category: string;
@@ -44,6 +45,18 @@ type ImportedPrompt = {
   outputMode: 'copy' | 'insert' | 'ai';
   enabled: boolean;
   variables: string[];
+};
+type ChatCompletionPayload = {
+  model: string;
+  temperature: number;
+  messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
+};
+type NativeAIResult = {
+  requestId: string;
+  ok: boolean;
+  status?: number;
+  body?: string;
+  message?: string;
 };
 
 const initialCategories: Category[] = [
@@ -86,7 +99,7 @@ const initialPrompts: Record<string, Prompt[]> = {
 const PROVIDERS = [
   { id: 'openai',    label: 'OpenAI',    placeholder: 'gpt-4o-mini' },
   { id: 'anthropic', label: 'Anthropic', placeholder: 'claude-sonnet-4' },
-  { id: 'deepseek',  label: 'DeepSeek',  placeholder: 'deepseek-chat' },
+  { id: 'deepseek',  label: 'DeepSeek',  placeholder: 'deepseek-v4-pro' },
   { id: 'custom',    label: '自定义',     placeholder: 'model-name' },
 ];
 
@@ -190,7 +203,7 @@ const findCategoryIdByLabel = (items: { id: string; label: string }[], label: st
 );
 
 const defaultAIBaseUrl = (provider: string) => {
-  if (provider === 'deepseek') return 'https://api.deepseek.com/v1';
+  if (provider === 'deepseek') return 'https://api.deepseek.com';
   if (provider === 'openai') return 'https://api.openai.com/v1';
   return '';
 };
@@ -201,6 +214,16 @@ const chatCompletionEndpoint = (provider: string, baseUrl: string) => {
   return root.endsWith('/chat/completions') ? root : `${root}/chat/completions`;
 };
 
+const modelForProvider = (provider: string, model: string) => {
+  const trimmed = model.trim();
+  const compact = trimmed.toLowerCase().replace(/\s+/g, '');
+  if (provider === 'deepseek' && compact === 'deepseek-4.0pro') return 'deepseek-v4-pro';
+  if (provider === 'deepseek' && compact === 'deepseek-4.0flash') return 'deepseek-v4-flash';
+  return trimmed;
+};
+
+const promptHistoryKey = (prompt: Prompt, categoryId: string) => `${categoryId}:${prompt.id}`;
+
 const parseJSONObject = (content: string) => {
   const trimmed = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try {
@@ -209,6 +232,105 @@ const parseJSONObject = (content: string) => {
     const match = trimmed.match(/\{[\s\S]*\}/);
     return match ? JSON.parse(match[0]) : {};
   }
+};
+
+const parseAIErrorBody = (body: string) => {
+  const trimmed = body.trim();
+  if (!trimmed) return '';
+  try {
+    const data = JSON.parse(trimmed);
+    return String(data?.error?.message || data?.message || trimmed);
+  } catch {
+    return trimmed;
+  }
+};
+
+const formatHTTPError = (status: number | undefined, body: string) => {
+  const message = parseAIErrorBody(body);
+  const prefix = status ? `HTTP ${status}` : '请求失败';
+  return message ? `${prefix}：${message}` : prefix;
+};
+
+const parseAIResponseJSON = (body: string, status?: number) => {
+  const trimmed = body.trim();
+  if (!trimmed) throw new Error(status ? `接口返回空内容（HTTP ${status}）` : '接口返回空内容');
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new Error(status ? `接口返回不是 JSON（HTTP ${status}）` : '接口返回不是 JSON');
+  }
+};
+
+const formatAIErrorMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || '请求失败');
+  return message.length > 80 ? `${message.slice(0, 77)}...` : message;
+};
+
+const requestNativeChatCompletion = (
+  endpoint: string,
+  apiKey: string,
+  body: ChatCompletionPayload,
+) => new Promise<unknown>((resolve, reject) => {
+  const handler = (window as any).webkit?.messageHandlers?.aiChatCompletion;
+  if (!handler) {
+    reject(new Error('当前环境不支持原生 AI 请求'));
+    return;
+  }
+
+  const requestId = `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const cleanup = () => {
+    window.clearTimeout(timeoutId);
+    window.removeEventListener('prompt-manager-ai-result', onResult);
+  };
+  const onResult = (event: Event) => {
+    const detail = (event as CustomEvent<NativeAIResult>).detail;
+    if (!detail || detail.requestId !== requestId) return;
+
+    cleanup();
+    if (!detail.ok) {
+      reject(new Error(detail.body ? formatHTTPError(detail.status, detail.body) : (detail.message || 'AI 请求失败')));
+      return;
+    }
+    try {
+      resolve(parseAIResponseJSON(detail.body || '', detail.status));
+    } catch (error) {
+      reject(error);
+    }
+  };
+  const timeoutId = window.setTimeout(() => {
+    cleanup();
+    reject(new Error('AI 请求超时'));
+  }, 60000);
+
+  window.addEventListener('prompt-manager-ai-result', onResult);
+  try {
+    handler.postMessage({ requestId, endpoint, apiKey: apiKey.trim(), body });
+  } catch (error) {
+    cleanup();
+    reject(error);
+  }
+});
+
+const requestChatCompletion = async (
+  endpoint: string,
+  apiKey: string,
+  body: ChatCompletionPayload,
+) => {
+  if ((window as any).webkit?.messageHandlers?.aiChatCompletion) {
+    return requestNativeChatCompletion(endpoint, apiKey, body);
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(formatHTTPError(response.status, text));
+  return parseAIResponseJSON(text, response.status);
 };
 
 export default function App() {
@@ -244,6 +366,7 @@ export default function App() {
   const [aiRewriting, setAiRewriting] = useState(false);
   const [rewriteHistory, setRewriteHistory] = useState<Record<string, string>[]>([]);
   const [rewriteHistoryIndex, setRewriteHistoryIndex] = useState(-1);
+  const [lastRewriteValues, setLastRewriteValues] = useState<Record<string, Record<string, string>>>(() => storedState.lastRewriteValues || {});
 
   const [aiEnabled, setAiEnabled] = useState(Boolean(storedState.aiEnabled));
   const [provider, setProvider] = useState(storedState.providerConfigs ? (storedState.provider || 'openai') : inferLegacyProvider(storedState));
@@ -277,9 +400,10 @@ export default function App() {
       aiEnabled,
       provider,
       providerConfigs,
+      lastRewriteValues,
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [categories, prompts, layout, aiEnabled, provider, providerConfigs]);
+  }, [categories, prompts, layout, aiEnabled, provider, providerConfigs, lastRewriteValues]);
 
   useEffect(() => {
     if (!configuredProviders.length) {
@@ -344,13 +468,23 @@ export default function App() {
   };
 
   const undoLastCall = () => {
-    if (rewriteHistory.length === 0 || rewriteHistoryIndex <= 0) {
+    if (rewriteHistory.length > 0 && rewriteHistoryIndex > 0) {
+      const nextIndex = rewriteHistoryIndex - 1;
+      setRewriteHistoryIndex(nextIndex);
+      setTemplateValues(prev => ({ ...prev, ...rewriteHistory[nextIndex] }));
+      showToast('已恢复上一次 AI 改写');
+      return;
+    }
+
+    const lastValues = selectedPrompt ? lastRewriteValues[promptHistoryKey(selectedPrompt, selectedCategoryId)] : undefined;
+    if (!lastValues || Object.values(lastValues).every(value => !value.trim())) {
       showToast('没有上一次 AI 改写');
       return;
     }
-    const nextIndex = rewriteHistoryIndex - 1;
-    setRewriteHistoryIndex(nextIndex);
-    setTemplateValues(prev => ({ ...prev, ...rewriteHistory[nextIndex] }));
+
+    setTemplateValues(prev => ({ ...prev, ...lastValues }));
+    setRewriteHistory([lastValues]);
+    setRewriteHistoryIndex(0);
     showToast('已恢复上一次 AI 改写');
   };
 
@@ -423,43 +557,35 @@ export default function App() {
 
     setAiRewriting(true);
     try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${activeCallConfig.apiKey.trim()}`,
-        },
-        body: JSON.stringify({
-          model: activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '',
-          temperature: 0.4,
-          messages: [
-            {
-              role: 'system',
-              content: [
-                '你是 Prompt 优化大师，擅长把用户的关键词或短句改写成可直接填入 Prompt 模板字段的内容。',
-                '你要基于原始输入材料、Prompt 名称、完整模板和字段名，判断每个字段真正需要的信息。',
-                '输出要简洁、直白、具体，避免空话、套话和过度包装。',
-                '字段值只能写最终要填入模板的内容，不要在字段值里添加“用户输入：”“选题来源：”“主题：”等说明性前缀。',
-                '不要复述字段名，不要解释生成过程，不要 Markdown。',
-                '只输出 JSON 对象。',
-              ].join('\n'),
-            },
-            {
-              role: 'user',
-              content: [
-                `Prompt 名称：${selectedPrompt.title}`,
-                `需要填写的字段：${fields.join('、')}`,
-                `完整模板：\n${selectedPrompt.prompt}`,
-                `原始输入材料：\n${brief}`,
-                '请返回一个 JSON 对象，key 必须使用上面的字段名，value 是适合填入该字段的中文内容。每个字段都要返回。',
-                'value 里不要出现“用户输入：”“原始输入材料：”“字段名：”这类标签，只写内容本身。',
-              ].join('\n\n'),
-            },
-          ],
-        }),
+      const rawModel = activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '';
+      const data = await requestChatCompletion(endpoint, activeCallConfig.apiKey, {
+        model: modelForProvider(activeCallProvider, rawModel),
+        temperature: 0.4,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              '你是 Prompt 优化大师，擅长把用户的关键词或短句改写成可直接填入 Prompt 模板字段的内容。',
+              '你要基于原始输入材料、Prompt 名称、完整模板和字段名，判断每个字段真正需要的信息。',
+              '输出要简洁、直白、具体，避免空话、套话和过度包装。',
+              '字段值只能写最终要填入模板的内容，不要在字段值里添加“用户输入：”“选题来源：”“主题：”等说明性前缀。',
+              '不要复述字段名，不要解释生成过程，不要 Markdown。',
+              '只输出 JSON 对象。',
+            ].join('\n'),
+          },
+          {
+            role: 'user',
+            content: [
+              `Prompt 名称：${selectedPrompt.title}`,
+              `需要填写的字段：${fields.join('、')}`,
+              `完整模板：\n${selectedPrompt.prompt}`,
+              `原始输入材料：\n${brief}`,
+              '请返回一个 JSON 对象，key 必须使用上面的字段名，value 是适合填入该字段的中文内容。每个字段都要返回。',
+              'value 里不要出现“用户输入：”“原始输入材料：”“字段名：”这类标签，只写内容本身。',
+            ].join('\n\n'),
+          },
+        ],
       });
-      if (!response.ok) throw new Error(await response.text());
-      const data = await response.json();
       const content = data?.choices?.[0]?.message?.content;
       if (!content) throw new Error('empty response');
       const parsed = parseJSONObject(String(content));
@@ -468,11 +594,12 @@ export default function App() {
       const nextHistory = [...baseHistory, nextValues];
       setRewriteHistory(nextHistory);
       setRewriteHistoryIndex(nextHistory.length - 1);
+      setLastRewriteValues(prev => ({ ...prev, [promptHistoryKey(selectedPrompt, selectedCategoryId)]: nextValues }));
       setTemplateValues(prev => ({ ...prev, ...nextValues }));
       showToast('AI 已改写并填入');
     } catch (error) {
       console.error(error);
-      showToast('AI 改写失败');
+      showToast(`AI 改写失败：${formatAIErrorMessage(error)}`);
     } finally {
       setAiRewriting(false);
     }
@@ -1345,7 +1472,7 @@ export default function App() {
           <Dialog.Overlay className="fixed inset-0 z-50"
             style={{ background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(4px)' }} />
           <Dialog.Content
-            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[560px] max-w-[92vw] rounded-3xl border"
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[560px] max-w-[92vw] max-h-[calc(100vh-48px)] overflow-hidden flex flex-col rounded-3xl border"
             style={{ background: '#fff', borderColor: '#e2e8f0',
               boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
             <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b" style={{ borderColor: '#f1f5f9' }}>
@@ -1357,7 +1484,7 @@ export default function App() {
                 <X className="w-4 h-4" />
               </Dialog.Close>
             </div>
-            <div className="px-6 py-5 space-y-4 max-h-[70vh] overflow-y-auto">
+            <div className="px-6 py-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
               {selectedPrompt && (
                 <div className="rounded-2xl border px-3 py-3" style={{ borderColor: '#dbe7ff', background: '#f8fbff' }}>
                   <div className="flex items-center justify-between gap-3 mb-2">
@@ -1405,7 +1532,7 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="flex flex-col items-end gap-1.5 px-6 pt-4 pb-[6px] border-t" style={{ borderColor: '#f1f5f9' }}>
+            <div className="flex flex-col items-end gap-1.5 px-6 pt-4 pb-3 border-t" style={{ borderColor: '#f1f5f9' }}>
               {configuredProviders.length > 0 && (
                 <div className="relative w-[300px] max-w-full">
                   <select

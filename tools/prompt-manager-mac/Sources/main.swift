@@ -101,6 +101,7 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         webView.configuration.userContentController.add(self, name: "exportExcel")
         webView.configuration.userContentController.add(self, name: "importFile")
         webView.configuration.userContentController.add(self, name: "usePrompt")
+        webView.configuration.userContentController.add(self, name: "aiChatCompletion")
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -129,6 +130,7 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "exportExcel")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "importFile")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "usePrompt")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "aiChatCompletion")
     }
 
     func showTool(over app: NSRunningApplication? = nil) {
@@ -467,6 +469,12 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
             return
         }
 
+        if message.name == "aiChatCompletion" {
+            guard let body = message.body as? [String: Any] else { return }
+            performAIChatCompletion(body)
+            return
+        }
+
         guard message.name == "exportExcel" else { return }
         guard
             let body = message.body as? [String: Any],
@@ -480,6 +488,101 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         let rawFilename = (body["filename"] as? String) ?? "prompt-library.xlsx"
         let filename = rawFilename.hasSuffix(".xlsx") ? rawFilename : "\(rawFilename).xlsx"
         showExcelSavePanel(filename: filename, data: data)
+    }
+
+    private func performAIChatCompletion(_ body: [String: Any]) {
+        guard
+            let requestId = body["requestId"] as? String,
+            let endpoint = body["endpoint"] as? String,
+            let url = URL(string: endpoint),
+            let apiKey = body["apiKey"] as? String,
+            let requestBody = body["body"] as? [String: Any]
+        else {
+            notifyAIChatCompletionResult(
+                requestId: body["requestId"] as? String ?? "",
+                ok: false,
+                status: nil,
+                body: nil,
+                message: "AI 请求参数无效"
+            )
+            return
+        }
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: requestBody, options: [])
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 60
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.httpBody = data
+
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                if let error {
+                    self?.notifyAIChatCompletionResult(
+                        requestId: requestId,
+                        ok: false,
+                        status: nil,
+                        body: nil,
+                        message: error.localizedDescription
+                    )
+                    return
+                }
+
+                let status = (response as? HTTPURLResponse)?.statusCode
+                let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                self?.notifyAIChatCompletionResult(
+                    requestId: requestId,
+                    ok: status.map { (200...299).contains($0) } ?? false,
+                    status: status,
+                    body: responseBody,
+                    message: nil
+                )
+            }.resume()
+        } catch {
+            notifyAIChatCompletionResult(
+                requestId: requestId,
+                ok: false,
+                status: nil,
+                body: nil,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func notifyAIChatCompletionResult(
+        requestId: String,
+        ok: Bool,
+        status: Int?,
+        body: String?,
+        message: String?
+    ) {
+        var detail: [String: Any] = [
+            "requestId": requestId,
+            "ok": ok,
+        ]
+        if let status {
+            detail["status"] = status
+        }
+        if let body {
+            detail["body"] = body
+        }
+        if let message {
+            detail["message"] = message
+        }
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: detail, options: []),
+            let json = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(
+                "window.dispatchEvent(new CustomEvent('prompt-manager-ai-result', { detail: \(json) }));",
+                completionHandler: nil
+            )
+        }
     }
 
     private func showImportOpenPanel() {
