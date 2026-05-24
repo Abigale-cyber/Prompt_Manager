@@ -14,7 +14,7 @@
 - 会记住用户手动调整后的窗口大小和位置
 - 默认浮窗尺寸为 `640 x 460`，并优先靠右显示
 - 调用 Prompt 后复制到剪贴板，并尝试切回原 App 自动粘贴
-- 以菜单栏后台工具运行，默认不打开完整管理窗口
+- 启动后显示在程序坞，同时保留菜单栏入口
 
 `⌥Space` 是 macOS 标准全局快捷键。只复制 Prompt 不需要额外权限；如果要自动粘贴到其他 App 的输入框，需要给 App 开启辅助功能权限。
 
@@ -32,6 +32,24 @@ open tools/prompt-manager-mac/build/PromptManager.app
 ```text
 tools/prompt-manager-mac/build/PromptManager.app
 ```
+
+## 打包测试版 DMG
+
+发给少量用户测试时，可以生成未公证的 DMG：
+
+```bash
+tools/prompt-manager-mac/build-dmg.sh
+```
+
+生成文件：
+
+```text
+tools/prompt-manager-mac/dist/PromptManager-0.0.1.dmg
+```
+
+DMG 内包含 `PromptManager.app` 和 `Applications` 快捷入口。用户打开 DMG 后，把 App 拖到 `Applications` 即可。
+
+这个 DMG 没有 Apple Developer ID 公证。第一次打开时，macOS 可能提示无法验证开发者；测试用户需要右键点击 App，选择“打开”，再确认一次。
 
 ## 前端原型预览
 

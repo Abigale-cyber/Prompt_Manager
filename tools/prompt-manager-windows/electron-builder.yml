@@ -1,0 +1,38 @@
+appId: com.local.promptmanager
+productName: Prompt Manager
+copyright: Copyright © 2026 Prompt Manager
+electronVersion: 33.4.11
+
+directories:
+  app: .
+  output: tools/prompt-manager-windows/dist
+
+files:
+  - package.json
+  - from: dist
+    to: dist
+    filter:
+      - '**/*'
+  - from: tools/prompt-manager-windows
+    to: tools/prompt-manager-windows
+    filter:
+      - electron-main.cjs
+
+extraMetadata:
+  main: tools/prompt-manager-windows/electron-main.cjs
+
+asar: true
+
+win:
+  target:
+    target: nsis
+    arch:
+      - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Prompt Manager
+
+artifactName: PromptManager-${version}-${arch}.${ext}

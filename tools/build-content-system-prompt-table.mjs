@@ -22,18 +22,18 @@ const promptRows = [
       '2. 每个切口必须包含：选题公式、推荐结构、时效判断、四维评分、标题方向、素材缺口。',
       '3. 四维评分包括：热爱程度、专业能力、市场需求、资源积累，每项 1-5 分。',
       '4. 优先推荐总分最高、最容易转成公众号观点文的切口。',
-      '5. 输出必须能交给 content-brief-builder 继续生成 brief。',
+      '5. 输出必须能交给 content_outline_builder 继续生成文章大纲。',
     ].join('\n'),
     '选题,热点,上游决策',
     'copy',
     'true',
   ],
   [
-    'Brief',
-    'Content Brief Builder：结构化创作简报',
-    '把已选题目整理成 stage-1 兼容 brief，锁定读者、核心观点、SCQA、素材和风险。',
+    '大纲',
+    'Content Outline Builder：文章大纲',
+    '把已选题目整理成可确认、可写作的文章大纲，锁定读者、核心判断、SCQA、素材和风险。',
     [
-      '请把以下选题整理成结构化创作 brief，不写正文。',
+      '请把以下选题整理成文章大纲 outline，不写正文。',
       '',
       '选题来源：{{选题来源}}',
       '主要想说：{{核心判断}}',
@@ -42,23 +42,25 @@ const promptRows = [
       '已有素材：{{已有素材}}',
       '',
       '要求：',
-      '1. 补全背景与语境、论证方向、可用案例 / 素材。',
+      '1. 先锁定目标读者、读者痛点、核心判断、写作目的和切入角度。',
       '2. 角度必须是一句话、有立场、与众不同。',
       '3. 必须包含 SCQA：情境(S)、冲突(C)、问题(Q)、答案(A)。',
-      '4. 素材至少 3 条，不足时标注推断或待验证。',
-      '5. 必须包含明确不要写什么、风格要求、配图方向、风险提醒、素材来源可信度。',
-      '6. 输出 section header 必须兼容 stage1 brief 模板。',
+      '4. 素材至少 3 条，每条标注来源可信度；不足时标注推断或待验证。',
+      '5. 必须输出独立的文章大纲，不能用推荐框架代替大纲。',
+      '6. 大纲每节必须包含：章节标题、要回答的问题、关键内容、可使用素材。',
+      '7. 软件介绍或教程类选题必须覆盖实际使用路径：安装/入口、初始化、核心操作、典型工作流、权限/边界、维护方法。',
+      '8. 必须包含风险提醒，并最后展示核心判断、切入角度、文章大纲摘要，等待确认。',
     ].join('\n'),
-    'brief,创作简报,SCQA',
+    'outline,文章大纲,SCQA',
     'copy',
     'true',
   ],
   [
     '采集',
-    'WeChat Collect：公众号原文转 Brief',
-    '从公开公众号文章提取标题、正文、作者和链接，生成再创作 brief。',
+    'WeChat Collect：公众号原文转 Outline',
+    '从公开公众号文章提取标题、正文、作者和链接，生成再创作 outline。',
     [
-      '请基于以下公众号原文采集结果，生成可进入 stage-1 写作链路的再创作 brief。',
+      '请基于以下公众号原文采集结果，生成可进入写作链路的再创作 outline。',
       '',
       '原文标题：{{原文标题}}',
       '原文作者 / 公众号：{{原文作者}}',
@@ -72,9 +74,9 @@ const promptRows = [
       '2. 提炼核心观点、背景语境和 3 个论证方向。',
       '3. 可用素材必须包含来源链接和作者信息。',
       '4. 明确提醒不要复刻原文结构、句子、标题党和营销腔。',
-      '5. 输出为 stage-1 兼容 brief。',
+      '5. 输出为 content-outline 兼容结构。',
     ].join('\n'),
-    '公众号采集,brief,再创作',
+    '公众号采集,outline,再创作',
     'copy',
     'true',
   ],
@@ -95,7 +97,7 @@ const promptRows = [
       '1. 汇总候选信息，保留标题、链接、来源、时间、热度和摘要。',
       '2. 推荐最多 3 个值得继续写的题目。',
       '3. 每个推荐题目补：推荐理由、写作角度、值得写评分、目标读者、核心痛点、标题方向、证据缺口和风险提醒。',
-      '4. 输出适合作为 topic-research 或 content-brief-builder 的上游材料。',
+      '4. 输出适合作为 topic-research 或 content_outline_builder 的上游材料。',
     ].join('\n'),
     '资讯扫描,研究,选题',
     'copy',
@@ -127,15 +129,16 @@ const promptRows = [
   [
     '文章',
     'Case Writer Hybrid：自动长文初稿',
-    '把结构化 brief 扩写为公众号长文，并生成 writing pack 与质量门控材料。',
+    '把结构化 outline 扩写为公众号长文，并生成 writing pack 与质量门控材料。',
     [
-      '请基于以下结构化 brief 生成一篇公众号长文初稿。',
+      '请基于以下结构化 outline 生成一篇公众号长文初稿。',
       '',
       '主题：{{topic}}',
       '目标读者：{{target_reader}}',
       '发布目标：{{publish_goal}}',
       '核心观点：{{core_view}}',
       '背景与语境：{{background}}',
+      '文章大纲：{{outline}}',
       '论证方向：{{arguments}}',
       '可用案例 / 素材：{{cases}}',
       '明确不要写什么：{{avoid}}',
@@ -145,8 +148,8 @@ const promptRows = [
       '素材可信度：{{material_confidence}}',
       '',
       '要求：',
-      '1. 保留用户提供的判断、框架和证据，优先使用 brief 里的论证方向。',
-      '2. 结构包含标题、导语、问题提出、核心判断、论证段、结论、可传播总结。',
+      '1. 保留用户提供的判断、文章大纲和证据，优先使用 outline 里的章节顺序。',
+      '2. 结构包含标题、导语、问题提出、核心判断、章节展开、结论、可传播总结。',
       '3. 如素材可信度低，只能作为待验证线索，不可写成确定事实。',
       '4. 每段尽量短，先说观点再说理由。',
       '5. 输出可进入 writer -> critic -> humanizer-zh -> judge 的本地质量循环。',
@@ -160,7 +163,7 @@ const promptRows = [
     'Case Writer Hybrid：交互式标题和大纲',
     '交互模式下先产出标题候选、结构选择和章节大纲，等待用户确认。',
     [
-      '请先不要写全文，只基于 brief 输出标题和大纲供确认。',
+      '请先不要写全文，只基于 outline 输出标题和大纲供确认。',
       '',
       '主题：{{topic}}',
       '目标读者：{{target_reader}}',
@@ -250,7 +253,7 @@ const promptRows = [
   [
     '短视频',
     'Script Writer Short：文章转口播脚本',
-    '把文章、brief 或题目笔记转成 60-180 秒短视频口播脚本。',
+    '把文章、outline 或题目笔记转成 60-180 秒短视频口播脚本。',
     [
       '请把以下文章或题目笔记转成短视频口播脚本。',
       '',
@@ -325,11 +328,11 @@ const promptRows = [
 const detailRows = [
   ['调用阶段', 'Prompt / 模板', '来源文件', '实际调用方式', '主要占位符', '确认点'],
   ['选题', 'Topic Radar：选题切口评估', 'skills/topic-radar/SKILL.md; skills/topic-radar/runtime.py', '本地规则生成，等价 Prompt 可导入管理器', '{{原始主题}}, {{原始材料}}', '是否需要把四维评分权重做成占位符'],
-  ['Brief', 'Content Brief Builder：结构化创作简报', 'skills/content-brief-builder/SKILL.md; runtime.py', '本地规则 + Skill 指令', '{{选题来源}}, {{核心判断}}, {{目标读者}}, {{发布目标}}, {{已有素材}}', '用户不足信息是否保留为必填占位符'],
-  ['采集', 'WeChat Collect：公众号原文转 Brief', 'skills/wechat-collect/runtime.py', '本地抽取 + brief 模板', '{{原文标题}}, {{原文作者}}, {{发布时间}}, {{原文链接}}, {{正文摘要段落}}, {{小标题}}', '是否和普通 Brief 合并，还是保留采集专用版本'],
+  ['大纲', 'Content Outline Builder：文章大纲', 'skills/content_outline_builder/SKILL.md', '本地规则 + Skill 指令', '{{选题来源}}, {{核心判断}}, {{目标读者}}, {{发布目标}}, {{已有素材}}', '用户不足信息是否保留为必填占位符'],
+  ['采集', 'WeChat Collect：公众号原文转 Outline', 'skills/wechat-collect/runtime.py', '本地抽取 + outline 模板', '{{原文标题}}, {{原文作者}}, {{发布时间}}, {{原文链接}}, {{正文摘要段落}}, {{小标题}}', '是否和普通 Outline 合并，还是保留采集专用版本'],
   ['研究', 'News Collect：资讯扫描报告', 'skills/news-collect/runtime.py', '调用 vendor 抓取后本地整理', '{{扫描主题}}, {{扫描来源}}, {{关键词}}, {{候选条目}}, {{请求备注}}', '是否把“推荐题目数”做成占位符'],
   ['研究', 'Topic Research：Tavily 深研查询', 'skills/topic-research/runtime.py', '真实外部研究查询 Prompt', '{{研究主题}}, {{研究问题}}, {{种子链接}}, {{首轮扫描上下文}}, {{补充要求}}', '这是最接近真实 LLM / research 调用的 Prompt'],
-  ['写作', 'Case Writer Hybrid：自动长文初稿', 'skills/case-writer-hybrid/SKILL.md; runtime.py', '本地写作模板 + 质量循环', '{{topic}}, {{target_reader}}, {{publish_goal}}, {{core_view}}, {{background}}, {{arguments}}, {{cases}}, {{scqa}}', '是否拆成“标题生成 / 正文生成 / 结尾生成”多个 Prompt'],
+  ['写作', 'Case Writer Hybrid：自动长文初稿', 'skills/case-writer-hybrid/SKILL.md; runtime.py', '本地写作模板 + 质量循环', '{{topic}}, {{target_reader}}, {{publish_goal}}, {{core_view}}, {{outline}}, {{arguments}}, {{cases}}, {{scqa}}', '是否拆成“标题生成 / 正文生成 / 结尾生成”多个 Prompt'],
   ['写作', 'Case Writer Hybrid：交互式标题和大纲', 'skills/case-writer-hybrid/SKILL.md; references/*.md', '交互式 Skill 指令', '{{topic}}, {{target_reader}}, {{publish_goal}}, {{core_view}}, {{arguments}}, {{scqa}}', '是否作为独立常用 Prompt 保留'],
   ['审稿', 'Adversarial Content Review：三角色审稿', 'skills/adversarial-content-review/SKILL.md; runtime.py', '本地评分器 + 角色审稿模板', '{{文章标题}}, {{文章正文}}', '是否要把评分阈值做成占位符'],
   ['改稿', 'Humanizer ZH：去 AI 痕迹与中文润色', 'skills/humanizer-zh/SKILL.md; skill_runtime/writing_core.py', '本地规则替换 + 润色指令', '{{原文内容}}, {{目标风格}}, {{保留要求}}', '是否增加“力度：轻/中/重”占位符'],
@@ -441,14 +444,14 @@ const firstOutput = await SpreadsheetFile.exportXlsx(firstWorkbook);
 const firstXlsxPath = path.join(outputDir, 'content-system-prompts-first-row.xlsx');
 await firstOutput.save(firstXlsxPath);
 
-const briefWorkbook = Workbook.create();
-const briefSheet = briefWorkbook.worksheets.add('Prompt导入模板');
-const briefRow = [
+const outlineWorkbook = Workbook.create();
+const outlineSheet = outlineWorkbook.worksheets.add('Prompt导入模板');
+const outlineRow = [
   '自媒体',
-  'Content Brief Builder：结构化创作简报',
-  '把已选题目整理成 stage-1 兼容 brief，锁定读者、核心观点、SCQA、素材和风险。',
+  '文章大纲',
+  '把选定题目整理成可确认、可写作的文章大纲。',
   [
-    '请把以下选题整理成结构化创作 brief，不写正文。',
+    '请把以下选题整理成文章大纲 outline，不写正文。',
     '',
     '选题来源：{{选题来源}}',
     '主要想说：{{核心判断}}',
@@ -457,34 +460,36 @@ const briefRow = [
     '已有素材：{{已有素材}}',
     '',
     '要求：',
-    '1. 补全背景与语境、论证方向、可用案例 / 素材。',
+    '1. 先锁定目标读者、读者痛点、核心判断、写作目的和切入角度。',
     '2. 角度必须是一句话、有立场、与众不同。',
     '3. 必须包含 SCQA：情境(S)、冲突(C)、问题(Q)、答案(A)。',
-    '4. 素材至少 3 条，不足时标注推断或待验证。',
-    '5. 必须包含明确不要写什么、风格要求、配图方向、风险提醒、素材来源可信度。',
-    '6. 输出 section header 必须兼容 stage1 brief 模板。',
+    '4. 素材至少 3 条，每条标注来源可信度；不足时标注推断或待验证。',
+    '5. 必须输出独立的文章大纲，不能用推荐框架代替大纲。',
+    '6. 大纲每节必须包含：章节标题、要回答的问题、关键内容、可使用素材。',
+    '7. 软件介绍或教程类选题必须覆盖实际使用路径：安装/入口、初始化、核心操作、典型工作流、权限/边界、维护方法。',
+    '8. 必须包含风险提醒，并最后展示核心判断、切入角度、文章大纲摘要，等待确认。',
   ].join('\n'),
-  'content-system,brief,创作简报,SCQA',
+  'content-system,outline,文章大纲,SCQA',
   'copy',
   'true',
 ];
-briefSheet.showGridLines = false;
-briefSheet.getRange('A1:G2').values = [promptRows[0], briefRow];
-briefSheet.freezePanes.freezeRows(1);
-briefSheet.getRange('A1:G1').format.fill.color = '#0F172A';
-briefSheet.getRange('A1:G1').format.font.color = '#FFFFFF';
-briefSheet.getRange('A1:G1').format.font.bold = true;
-briefSheet.getRange('A1:G2').format.wrapText = true;
-briefSheet.getRange('A1:G2').format.verticalAlignment = 'Top';
+outlineSheet.showGridLines = false;
+outlineSheet.getRange('A1:G2').values = [promptRows[0], outlineRow];
+outlineSheet.freezePanes.freezeRows(1);
+outlineSheet.getRange('A1:G1').format.fill.color = '#0F172A';
+outlineSheet.getRange('A1:G1').format.font.color = '#FFFFFF';
+outlineSheet.getRange('A1:G1').format.font.bold = true;
+outlineSheet.getRange('A1:G2').format.wrapText = true;
+outlineSheet.getRange('A1:G2').format.verticalAlignment = 'Top';
 [130, 260, 300, 680, 220, 90, 70].forEach((width, index) => {
   const col = String.fromCharCode(65 + index);
-  briefSheet.getRange(`${col}:${col}`).format.columnWidthPx = width;
+  outlineSheet.getRange(`${col}:${col}`).format.columnWidthPx = width;
 });
-briefSheet.getRange('A2:G2').format.rowHeightPx = 230;
-await briefWorkbook.render({ sheetName: 'Prompt导入模板', range: 'A1:G2', scale: 1 });
-const briefOutput = await SpreadsheetFile.exportXlsx(briefWorkbook);
-const briefXlsxPath = path.join(outputDir, 'content-system-brief-prompt-import-test.xlsx');
-await briefOutput.save(briefXlsxPath);
+outlineSheet.getRange('A2:G2').format.rowHeightPx = 260;
+await outlineWorkbook.render({ sheetName: 'Prompt导入模板', range: 'A1:G2', scale: 1 });
+const outlineOutput = await SpreadsheetFile.exportXlsx(outlineWorkbook);
+const outlineXlsxPath = path.join(outputDir, 'content-system-outline-prompt-import-test.xlsx');
+await outlineOutput.save(outlineXlsxPath);
 
 const markdownRows = promptRows.slice(1).map((row) => {
   const [category, title, description, prompt, tags, mode, enabled] = row;
@@ -499,7 +504,7 @@ const markdown = [
   '',
   '## 初步判断',
   '',
-  '- 主链路：topic-radar / content-brief-builder / case-writer-hybrid / adversarial-content-review / generate-image / wechat-formatter。',
+  '- 主链路：topic-radar / content_outline_builder / case-writer-hybrid / adversarial-content-review / generate-image / wechat-formatter。',
   '- 采集研究链路：news-collect / topic-research / wechat-collect / wechat-report。',
   '- 衍生分发链路：script-writer-short。',
   '- 其中 wechat-formatter 是本地格式化，不是 LLM Prompt；先放入表中用于确认是否管理。',
@@ -509,5 +514,5 @@ await fs.writeFile(mdPath, markdown, 'utf8');
 
 console.log(xlsxPath);
 console.log(firstXlsxPath);
-console.log(briefXlsxPath);
+console.log(outlineXlsxPath);
 console.log(mdPath);

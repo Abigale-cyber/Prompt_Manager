@@ -84,7 +84,7 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
             backing: .buffered,
             defer: false
         )
-        window.title = "Prompt 管理器"
+        window.title = "Prompt Manager"
         window.minSize = NSSize(width: 520, height: 380)
         window.center()
         window.isFloatingPanel = true
@@ -415,6 +415,29 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
             panel.beginSheetModal(for: window, completionHandler: completion)
         } else {
             completion(panel.runModal())
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+
+        let complete: (NSApplication.ModalResponse) -> Void = { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: complete)
+        } else {
+            complete(alert.runModal())
         }
     }
 
@@ -897,7 +920,7 @@ final class HotKeyController {
             modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
-            0,
+            UInt32(kEventHotKeyExclusive),
             &ref
         )
 
@@ -1266,7 +1289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activationObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
         setupMainMenu()
         setupStatusItem()
         launcherController.onSelect = { [weak self] item, sourceApp in
@@ -1305,10 +1328,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Prompt"
+        item.button?.title = "Prompt Manager"
+        if let menuBarImage = NSImage(named: "PromptManagerMenuBar") {
+            menuBarImage.size = NSSize(width: 18, height: 18)
+            item.button?.image = menuBarImage
+            item.button?.imagePosition = .imageLeading
+        }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "打开 Prompt 管理器", action: #selector(openWindow), keyEquivalent: "p"))
+        menu.addItem(NSMenuItem(title: "Open Prompt Manager", action: #selector(openWindow), keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "重新加载页面", action: #selector(reloadWindow), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "快捷键：\(hotKeyLabel)", action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
@@ -1467,7 +1495,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if shortcut == .paste {
             let pendingPromptText = NSPasteboard.general.string(forType: .string) ?? ""
             if !pendingPromptText.isEmpty {
-                if insertPrompt(pendingPromptText, intoFocusedElementOf: targetApp) {
+                if !shouldUseKeyboardPaste(for: targetApp),
+                   insertPrompt(pendingPromptText, intoFocusedElementOf: targetApp) {
                     return
                 }
             }
@@ -1476,6 +1505,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !postKeyboardShortcut(shortcut), shortcut == .paste {
             pasteWithAppleScriptFallback()
         }
+    }
+
+    private func shouldUseKeyboardPaste(for app: NSRunningApplication) -> Bool {
+        guard let bundleIdentifier = app.bundleIdentifier else {
+            return false
+        }
+
+        let keyboardPasteBundleIdentifiers: Set<String> = [
+            "co.zeit.hyper",
+            "com.apple.Terminal",
+            "com.exafunction.windsurf",
+            "com.github.wez.wezterm",
+            "com.googlecode.iterm2",
+            "com.microsoft.VSCode",
+            "com.microsoft.VSCodeInsiders",
+            "com.mitchellh.ghostty",
+            "com.todesktop.230313mzl4w4u92",
+            "dev.warp.Warp-Preview",
+            "dev.warp.Warp-Stable",
+            "net.kovidgoyal.kitty",
+            "org.alacritty"
+        ]
+
+        return keyboardPasteBundleIdentifiers.contains(bundleIdentifier)
     }
 
     private func insertPrompt(_ prompt: String, intoFocusedElementOf app: NSRunningApplication) -> Bool {

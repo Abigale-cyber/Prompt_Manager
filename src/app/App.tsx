@@ -4,7 +4,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
 import { Search, Sparkles, Code2, Megaphone, ClipboardList, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp } from 'lucide-react';
 import { buildPromptTemplateRows, createPromptWorkbookBlob } from './promptExcel.js';
-import { extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, normalizeImportedPromptRows, parseCsvRows, tableRowsToObjects } from './promptTemplate.js';
+import { extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, moveItemById, normalizeImportedPromptRows, parseCsvRows, tableRowsToObjects } from './promptTemplate.js';
+import appIconUrl from '../../tools/prompt-manager-mac/Assets/PromptManager.svg';
 
 type Prompt = {
   id: number;
@@ -22,6 +23,7 @@ type Prompt = {
 type Category = { id: string; label: string; icon: any; visible: boolean };
 type Layout = 'one' | 'two';
 type StoredCategory = { id: string; label: string; visible: boolean };
+type AIProviderConfig = { model: string; apiKey: string; baseUrl: string };
 type StoredState = {
   categories?: StoredCategory[];
   prompts?: Record<string, Prompt[]>;
@@ -31,6 +33,7 @@ type StoredState = {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  providerConfigs?: Record<string, AIProviderConfig>;
 };
 type ImportedPrompt = {
   category: string;
@@ -86,6 +89,44 @@ const PROVIDERS = [
   { id: 'deepseek',  label: 'DeepSeek',  placeholder: 'deepseek-chat' },
   { id: 'custom',    label: '自定义',     placeholder: 'model-name' },
 ];
+
+const createDefaultProviderConfigs = () => Object.fromEntries(
+  PROVIDERS.map(provider => [provider.id, { model: '', apiKey: '', baseUrl: '' }]),
+) as Record<string, AIProviderConfig>;
+
+const inferLegacyProvider = (stored: StoredState) => {
+  const baseUrl = String(stored.baseUrl || '').toLowerCase();
+  if (baseUrl.includes('deepseek')) return 'deepseek';
+  if (baseUrl.includes('anthropic')) return 'anthropic';
+  return stored.provider || 'openai';
+};
+
+const restoreProviderConfigs = (stored: StoredState) => {
+  const next = createDefaultProviderConfigs();
+  if (stored.providerConfigs && typeof stored.providerConfigs === 'object') {
+    Object.entries(stored.providerConfigs).forEach(([id, config]) => {
+      if (!next[id]) return;
+      next[id] = {
+        model: config?.model || '',
+        apiKey: config?.apiKey || '',
+        baseUrl: config?.baseUrl || '',
+      };
+    });
+    return next;
+  }
+
+  if (stored.model || stored.apiKey || stored.baseUrl) {
+    const providerId = inferLegacyProvider(stored);
+    if (next[providerId]) {
+      next[providerId] = {
+        model: stored.provider === providerId ? (stored.model || '') : '',
+        apiKey: stored.apiKey || '',
+        baseUrl: stored.baseUrl || '',
+      };
+    }
+  }
+  return next;
+};
 
 const STORAGE_KEY = 'prompt-management-tool:v1';
 
@@ -183,14 +224,21 @@ export default function App() {
   const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
   const [tabsOverflowing, setTabsOverflowing] = useState(false);
   const [tabsExpanded, setTabsExpanded] = useState(false);
+  const [draggingPromptId, setDraggingPromptId] = useState<number | null>(null);
+  const [dragOverPromptId, setDragOverPromptId] = useState<number | null>(null);
+  const [promptDragActive, setPromptDragActive] = useState(false);
+  const [promptDragOffset, setPromptDragOffset] = useState({ x: 0, y: 0 });
   const tabListRef = useRef<HTMLDivElement | null>(null);
   const draggingCategoryIdRef = useRef<string | null>(null);
+  const draggingPromptIdRef = useRef<number | null>(null);
+  const promptDragStartRef = useRef({ x: 0, y: 0 });
   const suppressCategoryClickRef = useRef(false);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [addPromptOpen, setAddPromptOpen] = useState(false);
   const [callPromptOpen, setCallPromptOpen] = useState(false);
   const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
+  const [selectedCategoryId, setSelectedCategoryId] = useState(activeTab);
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const [aiRewriteInput, setAiRewriteInput] = useState('');
   const [aiRewriting, setAiRewriting] = useState(false);
@@ -198,10 +246,9 @@ export default function App() {
   const [rewriteHistoryIndex, setRewriteHistoryIndex] = useState(-1);
 
   const [aiEnabled, setAiEnabled] = useState(Boolean(storedState.aiEnabled));
-  const [provider, setProvider] = useState(storedState.provider || 'openai');
-  const [model, setModel] = useState(storedState.model || 'gpt-4o-mini');
-  const [apiKey, setApiKey] = useState(storedState.apiKey || '');
-  const [baseUrl, setBaseUrl] = useState(storedState.baseUrl || '');
+  const [provider, setProvider] = useState(storedState.providerConfigs ? (storedState.provider || 'openai') : inferLegacyProvider(storedState));
+  const [providerConfigs, setProviderConfigs] = useState<Record<string, AIProviderConfig>>(() => restoreProviderConfigs(storedState));
+  const [callProvider, setCallProvider] = useState('');
   const [editingPromptId, setEditingPromptId] = useState<number | null>(null);
 
   // add prompt form
@@ -209,6 +256,10 @@ export default function App() {
   const [formDesc, setFormDesc] = useState('');
   const [formPrompt, setFormPrompt] = useState('');
   const [formCategory, setFormCategory] = useState(activeTab);
+  const currentProviderConfig = providerConfigs[provider] || createDefaultProviderConfigs()[provider] || { model: '', apiKey: '', baseUrl: '' };
+  const configuredProviders = PROVIDERS.filter(item => providerConfigs[item.id]?.apiKey.trim());
+  const activeCallProvider = callProvider || configuredProviders[0]?.id || provider;
+  const activeCallConfig = providerConfigs[activeCallProvider] || currentProviderConfig;
 
   useEffect(() => {
     const cur = categories.find(c => c.id === activeTab && c.visible);
@@ -225,12 +276,20 @@ export default function App() {
       layout,
       aiEnabled,
       provider,
-      model,
-      apiKey,
-      baseUrl,
+      providerConfigs,
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [categories, prompts, layout, aiEnabled, provider, model, apiKey, baseUrl]);
+  }, [categories, prompts, layout, aiEnabled, provider, providerConfigs]);
+
+  useEffect(() => {
+    if (!configuredProviders.length) {
+      setCallProvider('');
+      return;
+    }
+    if (!configuredProviders.some(item => item.id === callProvider)) {
+      setCallProvider(configuredProviders[0].id);
+    }
+  }, [configuredProviders, callProvider]);
 
   useEffect(() => {
     const list = tabListRef.current;
@@ -254,6 +313,21 @@ export default function App() {
   useEffect(() => {
     if (!tabsOverflowing) setTabsExpanded(false);
   }, [tabsOverflowing]);
+
+  useEffect(() => {
+    if (!promptDragActive) return;
+    const previousUserSelect = document.body.style.userSelect;
+    const previousWebkitUserSelect = document.body.style.webkitUserSelect;
+    const previousCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.webkitUserSelect = 'none';
+    document.body.style.cursor = 'grabbing';
+    return () => {
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.webkitUserSelect = previousWebkitUserSelect;
+      document.body.style.cursor = previousCursor;
+    };
+  }, [promptDragActive]);
 
   useEffect(() => {
     const onExportResult = (event: Event) => {
@@ -280,24 +354,30 @@ export default function App() {
     showToast('已恢复上一次 AI 改写');
   };
 
-  const finishCall = async (prompt: string, id: number) => {
+  const finishCall = async (prompt: string, id: number, categoryId = activeTab) => {
     setCalledId(id);
     setTimeout(() => setCalledId(null), 1200);
     setPrompts(prev => ({
       ...prev,
-      [activeTab]: (prev[activeTab] || []).map(item =>
+      [categoryId]: (prev[categoryId] || []).map(item =>
         item.id === id ? { ...item, usageCount: (item.usageCount || 0) + 1, updatedAt: Date.now() } : item
       ),
     }));
     const webkit = (window as any).webkit;
-    const sourcePrompt = (prompts[activeTab] || []).find(item => item.id === id);
+    const sourcePrompt = (prompts[categoryId] || []).find(item => item.id === id);
     if (webkit?.messageHandlers?.usePrompt) {
       webkit.messageHandlers.usePrompt.postMessage({
         id,
         title: sourcePrompt?.title || 'Prompt',
         description: sourcePrompt?.description || '',
         prompt,
-        categoryId: activeTab,
+        categoryId,
+        ai: aiEnabled ? {
+          provider: activeCallProvider,
+          model: activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '',
+          apiKey: activeCallConfig.apiKey,
+          baseUrl: activeCallConfig.baseUrl,
+        } : undefined,
       });
       showToast('Prompt 已调用');
       return;
@@ -308,10 +388,11 @@ export default function App() {
     } catch { showToast('调用失败'); }
   };
 
-  const handleCall = async (prompt: Prompt) => {
+  const handleCall = async (prompt: Prompt, categoryId = activeTab) => {
     const fields = extractTemplateFields(prompt.prompt);
     if (fields.length > 0) {
       setSelectedPrompt(prompt);
+      setSelectedCategoryId(categoryId);
       setTemplateValues(Object.fromEntries(fields.map(field => [field, ''])));
       setAiRewriteInput('');
       setRewriteHistory([]);
@@ -319,7 +400,7 @@ export default function App() {
       setCallPromptOpen(true);
       return;
     }
-    await finishCall(prompt.prompt, prompt.id);
+    await finishCall(prompt.prompt, prompt.id, categoryId);
   };
 
   const rewriteTemplateWithAI = async () => {
@@ -330,11 +411,11 @@ export default function App() {
       showToast('请先输入要改写的关键词或句子');
       return;
     }
-    if (!apiKey.trim()) {
+    if (!activeCallConfig.apiKey.trim()) {
       showToast('请先在设置里配置 API Key');
       return;
     }
-    const endpoint = chatCompletionEndpoint(provider, baseUrl);
+    const endpoint = chatCompletionEndpoint(activeCallProvider, activeCallConfig.baseUrl);
     if (!endpoint) {
       showToast('请先配置兼容 /chat/completions 的 Base URL');
       return;
@@ -346,10 +427,10 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey.trim()}`,
+          Authorization: `Bearer ${activeCallConfig.apiKey.trim()}`,
         },
         body: JSON.stringify({
-          model,
+          model: activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '',
           temperature: 0.4,
           messages: [
             {
@@ -405,9 +486,10 @@ export default function App() {
       showToast(`请填写：${missingField}`);
       return;
     }
-    await finishCall(fillPromptTemplate(selectedPrompt.prompt, templateValues), selectedPrompt.id);
+    await finishCall(fillPromptTemplate(selectedPrompt.prompt, templateValues), selectedPrompt.id, selectedCategoryId);
     setCallPromptOpen(false);
     setSelectedPrompt(null);
+    setSelectedCategoryId(activeTab);
     setTemplateValues({});
     setRewriteHistory([]);
     setRewriteHistoryIndex(-1);
@@ -586,6 +668,15 @@ export default function App() {
   const updateCategory = (id: string, patch: Partial<Category>) => {
     setCategories(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
   };
+  const updateProviderConfig = (id: string, patch: Partial<AIProviderConfig>) => {
+    setProviderConfigs(prev => ({
+      ...prev,
+      [id]: {
+        ...(prev[id] || createDefaultProviderConfigs()[id] || { model: '', apiKey: '', baseUrl: '' }),
+        ...patch,
+      },
+    }));
+  };
   const addCategory = () => {
     const id = 'cat_' + Date.now();
     setCategories(prev => [...prev, { id, label: '新分类', icon: Folder, visible: true }]);
@@ -654,6 +745,71 @@ export default function App() {
     suppressCategoryClickRef.current = false;
   };
 
+  const getPromptIdAtPoint = (x: number, y: number, excludeId?: number) => {
+    const targets = document.elementsFromPoint(x, y);
+    for (const target of targets) {
+      if (!(target instanceof HTMLElement)) continue;
+      const value = target.closest<HTMLElement>('[data-prompt-card-id]')?.dataset.promptCardId;
+      if (!value) continue;
+      const promptId = Number(value);
+      if (promptId !== excludeId) return promptId;
+    }
+    return null;
+  };
+
+  const clearPromptDrag = () => {
+    draggingPromptIdRef.current = null;
+    setDraggingPromptId(null);
+    setDragOverPromptId(null);
+    setPromptDragActive(false);
+    setPromptDragOffset({ x: 0, y: 0 });
+  };
+
+  const handlePromptPointerDown = (event: PointerEvent<HTMLDivElement>, promptId: number) => {
+    if (event.button !== 0 || searchQuery.trim()) return;
+    if ((event.target as HTMLElement).closest('[data-no-prompt-drag]')) return;
+    event.preventDefault();
+    draggingPromptIdRef.current = promptId;
+    setDraggingPromptId(promptId);
+    setDragOverPromptId(null);
+    setPromptDragActive(false);
+    setPromptDragOffset({ x: 0, y: 0 });
+    promptDragStartRef.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePromptPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const sourceId = draggingPromptIdRef.current;
+    if (!sourceId) return;
+    event.preventDefault();
+    const offset = {
+      x: event.clientX - promptDragStartRef.current.x,
+      y: event.clientY - promptDragStartRef.current.y,
+    };
+    const distance = Math.hypot(
+      offset.x,
+      offset.y,
+    );
+    if (!promptDragActive && distance < 8) return;
+    if (!promptDragActive) setPromptDragActive(true);
+    setPromptDragOffset(offset);
+    const targetId = getPromptIdAtPoint(event.clientX, event.clientY, sourceId);
+    setDragOverPromptId(targetId && targetId !== sourceId ? targetId : null);
+  };
+
+  const handlePromptPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    const sourceId = draggingPromptIdRef.current;
+    const targetId = getPromptIdAtPoint(event.clientX, event.clientY, sourceId || undefined);
+    if (promptDragActive && sourceId && targetId && sourceId !== targetId) {
+      setPrompts(prev => ({
+        ...prev,
+        [activeTab]: moveItemById(prev[activeTab] || [], sourceId, targetId) as Prompt[],
+      }));
+      showToast('Prompt 顺序已更新');
+    }
+    clearPromptDrag();
+  };
+
   const list = (prompts[activeTab] || []).filter(prompt => prompt.enabled !== false);
   const filteredPrompts = list.filter(p =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -681,115 +837,157 @@ export default function App() {
   });
 
   const callLauncherPrompt = async (prompt: Prompt, categoryId: string) => {
-    setCalledId(prompt.id);
-    setPrompts(prev => ({
-      ...prev,
-      [categoryId]: (prev[categoryId] || []).map(item =>
-        item.id === prompt.id ? { ...item, usageCount: (item.usageCount || 0) + 1, updatedAt: Date.now() } : item
-      ),
-    }));
-
-    const webkit = (window as any).webkit;
-    if (webkit?.messageHandlers?.usePrompt) {
-      webkit.messageHandlers.usePrompt.postMessage({
-        id: prompt.id,
-        title: prompt.title,
-        description: prompt.description,
-        prompt: prompt.prompt,
-        categoryId,
-      });
-      return;
-    }
-
-    await navigator.clipboard.writeText(prompt.prompt);
-    showToast('Prompt 已复制');
+    await handleCall(prompt, categoryId);
   };
+
+  const launcherFillTemplateDialog = (
+    <Dialog.Root open={callPromptOpen} onOpenChange={setCallPromptOpen}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50"
+          style={{ background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(4px)' }} />
+        <Dialog.Content
+          className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[560px] max-w-[92vw] rounded-3xl border"
+          style={{ background: '#fff', borderColor: '#e2e8f0',
+            boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
+          <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b" style={{ borderColor: '#f1f5f9' }}>
+            <Dialog.Title style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>
+              {selectedPrompt?.title || '填写 Prompt'}
+            </Dialog.Title>
+            <Dialog.Close className="grid place-items-center rounded-full hover:bg-slate-100"
+              style={{ width: 32, height: 32, color: '#64748b' }}>
+              <X className="w-4 h-4" />
+            </Dialog.Close>
+          </div>
+          <div className="px-6 py-5 space-y-4 max-h-[70vh] overflow-y-auto">
+            {selectedPrompt && extractTemplateFields(selectedPrompt.prompt).map(field => (
+              <div key={field}>
+                <label style={{ fontSize: 11, color: '#64748b' }}>{field}</label>
+                <textarea
+                  value={templateValues[field] || ''}
+                  onChange={(e) => setTemplateValues(prev => ({ ...prev, [field]: e.target.value }))}
+                  placeholder={`填写${field}`}
+                  rows={field.includes('内容') || field.includes('代码') || field.includes('原文') ? 5 : 2}
+                  className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a] resize-none"
+                  style={{ fontSize: 13, borderColor: '#e2e8f0', lineHeight: 1.6 }}
+                />
+              </div>
+            ))}
+            {selectedPrompt && (
+              <div className="rounded-xl border px-3 py-2" style={{ borderColor: '#e2e8f0', background: '#f8fafc' }}>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>生成预览</div>
+                <pre className="whitespace-pre-wrap break-words max-h-36 overflow-auto"
+                  style={{ fontSize: 12, color: '#334155', lineHeight: 1.55, fontFamily: 'ui-monospace, monospace' }}>
+                  {selectedPrompt ? fillPromptTemplate(selectedPrompt.prompt, templateValues) : ''}
+                </pre>
+              </div>
+            )}
+          </div>
+          <div className="flex justify-end gap-2 px-6 py-4 border-t" style={{ borderColor: '#f1f5f9' }}>
+            <Dialog.Close
+              className="rounded-full border px-5 py-2 transition-colors hover:bg-slate-50"
+              style={{ fontSize: 13, borderColor: '#e2e8f0', color: '#475569' }}>
+              取消
+            </Dialog.Close>
+            <button onClick={submitTemplateCall}
+              className="inline-flex items-center justify-center gap-1.5 rounded-full text-white px-5 py-2 transition-all hover:-translate-y-0.5"
+              style={{ fontSize: 13, background: 'linear-gradient(135deg,#3b63ff,#6366f1)',
+                boxShadow: '0 4px 14px rgba(59,99,255,0.28)' }}>
+              <Send className="w-3.5 h-3.5 shrink-0" />调用
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
 
   if (isLauncherMode) {
     return (
-      <div className="size-full overflow-hidden relative" style={{ background: 'transparent' }}>
-        <style>{`
-          body { background: transparent; }
-          @keyframes launcherIn { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
-        `}</style>
-        <div className="absolute inset-0 p-5">
-          <div className="size-full rounded-[28px] border overflow-hidden"
-            style={{ animation: 'launcherIn .16s ease-out both',
-              background: 'linear-gradient(135deg, rgba(248,250,252,.96), rgba(239,246,255,.94) 48%, rgba(245,243,255,.94))',
-              borderColor: 'rgba(226,232,240,.9)',
-              boxShadow: '0 28px 80px rgba(15,23,42,.24), inset 0 1px 0 rgba(255,255,255,.85)' }}>
-            <div className="px-5 pt-5 pb-3">
-              <div className="h-14 rounded-2xl border flex items-center gap-3 px-4"
-                style={{ background: 'rgba(255,255,255,.82)', borderColor: '#dbe3ef',
-                  boxShadow: '0 6px 22px rgba(15,23,42,.05)' }}>
-                <Search className="w-5 h-5 shrink-0" style={{ color: '#64748b' }} />
-                <input
-                  autoFocus
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') {
-                      (window as any).webkit?.messageHandlers?.closeLauncher?.postMessage({});
-                    }
-                    if (event.key === 'Enter' && launcherItems[0]) {
-                      callLauncherPrompt(launcherItems[0].prompt, launcherItems[0].category.id);
-                    }
-                  }}
-                  placeholder="搜索 Prompt 名称或描述..."
-                  className="flex-1 min-w-0 bg-transparent outline-none"
-                  style={{ fontSize: 18, fontWeight: 600, color: '#0f172a' }}
-                />
-              </div>
-            </div>
-
-            <div className="px-5 pb-5 h-[calc(100%-92px)] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
-                {launcherItems.map(({ prompt, category }) => {
-                  const called = calledId === prompt.id;
-                  return (
-                    <button key={`${category.id}-${prompt.id}`}
-                      onClick={() => callLauncherPrompt(prompt, category.id)}
-                      className="group text-left rounded-2xl border px-5 py-4 flex items-center gap-4 transition-all active:scale-[.99] hover:-translate-y-0.5"
-                      style={{ background: called ? 'rgba(239,246,255,.96)' : 'rgba(255,255,255,.86)',
-                        borderColor: called ? '#3b63ff' : 'rgba(226,232,240,.9)',
-                        boxShadow: called ? '0 8px 24px rgba(59,99,255,.16)' : '0 5px 18px rgba(15,23,42,.05)' }}>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate" style={{ fontSize: 15, fontWeight: 700, color: '#0f172a' }}>
-                          {prompt.title}
-                        </div>
-                        <div className="truncate mt-1" style={{ fontSize: 12.5, color: '#64748b' }}>
-                          {prompt.description}
-                        </div>
-                        <div className="mt-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1"
-                          style={{ background: 'rgba(241,245,249,.85)', color: '#64748b', fontSize: 11, fontWeight: 600 }}>
-                          <span>{category.label}</span>
-                          <span>·</span>
-                          <span>已用 {prompt.usageCount || 0} 次</span>
-                        </div>
-                      </div>
-                      <div className="shrink-0 grid place-items-center rounded-full"
-                        style={{ width: 38, height: 38, color: '#fff',
-                          background: called
-                            ? 'linear-gradient(135deg,#10b981,#059669)'
-                            : 'linear-gradient(135deg,#3b63ff,#6366f1)',
-                          boxShadow: '0 6px 18px rgba(59,99,255,.24)' }}>
-                        {called ? <Check className="w-4 h-4" /> : <Send className="w-4 h-4" />}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {launcherItems.length === 0 && (
-                <div className="h-full grid place-items-center rounded-2xl border mt-2"
-                  style={{ background: 'rgba(255,255,255,.62)', borderColor: '#e2e8f0', color: '#94a3b8', fontSize: 14 }}>
-                  未找到匹配的 Prompt
+      <>
+        <div className="size-full overflow-hidden relative" style={{ background: 'transparent' }}>
+          <style>{`
+            body { background: transparent; }
+            @keyframes launcherIn { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+          `}</style>
+          <div className="absolute inset-0 p-5">
+            <div className="size-full rounded-[28px] border overflow-hidden"
+              style={{ animation: 'launcherIn .16s ease-out both',
+                background: 'linear-gradient(135deg, rgba(248,250,252,.96), rgba(239,246,255,.94) 48%, rgba(245,243,255,.94))',
+                borderColor: 'rgba(226,232,240,.9)',
+                boxShadow: '0 28px 80px rgba(15,23,42,.24), inset 0 1px 0 rgba(255,255,255,.85)' }}>
+              <div className="px-5 pt-5 pb-3">
+                <div className="h-14 rounded-2xl border flex items-center gap-3 px-4"
+                  style={{ background: 'rgba(255,255,255,.82)', borderColor: '#dbe3ef',
+                    boxShadow: '0 6px 22px rgba(15,23,42,.05)' }}>
+                  <Search className="w-5 h-5 shrink-0" style={{ color: '#64748b' }} />
+                  <input
+                    autoFocus
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        (window as any).webkit?.messageHandlers?.closeLauncher?.postMessage({});
+                      }
+                      if (event.key === 'Enter' && launcherItems[0]) {
+                        callLauncherPrompt(launcherItems[0].prompt, launcherItems[0].category.id);
+                      }
+                    }}
+                    placeholder="搜索 Prompt 名称或描述..."
+                    className="flex-1 min-w-0 bg-transparent outline-none"
+                    style={{ fontSize: 18, fontWeight: 600, color: '#0f172a' }}
+                  />
                 </div>
-              )}
+              </div>
+
+              <div className="px-5 pb-5 h-[calc(100%-92px)] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-3">
+                  {launcherItems.map(({ prompt, category }) => {
+                    const called = calledId === prompt.id;
+                    return (
+                      <button key={`${category.id}-${prompt.id}`}
+                        onClick={() => callLauncherPrompt(prompt, category.id)}
+                        className="group text-left rounded-2xl border px-5 py-4 flex items-center gap-4 transition-all active:scale-[.99] hover:-translate-y-0.5"
+                        style={{ background: called ? 'rgba(239,246,255,.96)' : 'rgba(255,255,255,.86)',
+                          borderColor: called ? '#3b63ff' : 'rgba(226,232,240,.9)',
+                          boxShadow: called ? '0 8px 24px rgba(59,99,255,.16)' : '0 5px 18px rgba(15,23,42,.05)' }}>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate" style={{ fontSize: 15, fontWeight: 700, color: '#0f172a' }}>
+                            {prompt.title}
+                          </div>
+                          <div className="truncate mt-1" style={{ fontSize: 12.5, color: '#64748b' }}>
+                            {prompt.description}
+                          </div>
+                          <div className="mt-2 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1"
+                            style={{ background: 'rgba(241,245,249,.85)', color: '#64748b', fontSize: 11, fontWeight: 600 }}>
+                            <span>{category.label}</span>
+                            <span>·</span>
+                            <span>已用 {prompt.usageCount || 0} 次</span>
+                          </div>
+                        </div>
+                        <div className="shrink-0 grid place-items-center rounded-full"
+                          style={{ width: 38, height: 38, color: '#fff',
+                            background: called
+                              ? 'linear-gradient(135deg,#10b981,#059669)'
+                              : 'linear-gradient(135deg,#3b63ff,#6366f1)',
+                            boxShadow: '0 6px 18px rgba(59,99,255,.24)' }}>
+                          {called ? <Check className="w-4 h-4" /> : <Send className="w-4 h-4" />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {launcherItems.length === 0 && (
+                  <div className="h-full grid place-items-center rounded-2xl border mt-2"
+                    style={{ background: 'rgba(255,255,255,.62)', borderColor: '#e2e8f0', color: '#94a3b8', fontSize: 14 }}>
+                    未找到匹配的 Prompt
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
-      </div>
+        {launcherFillTemplateDialog}
+      </>
     );
   }
 
@@ -819,12 +1017,9 @@ export default function App() {
               WebkitBackdropFilter: 'blur(16px)', borderColor: 'rgba(255,255,255,0.9)',
               boxShadow: '0 4px 24px rgba(15,23,42,0.06)' }}>
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-full grid place-items-center border"
-                style={{ background: 'linear-gradient(135deg,#d4e3ff,#fff7fb)', borderColor: '#dce6f5' }}>
-                <Sparkles className="w-4 h-4" style={{ color: '#3b63ff' }} />
-              </div>
+              <img src={appIconUrl} alt="" className="w-11 h-11 shrink-0" />
               <div className="leading-tight">
-                <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>Prompt 管理器</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>Prompt Manager</div>
                 <div style={{ fontSize: 10, color: '#94a3b8' }}>AI Prompt Library</div>
               </div>
             </div>
@@ -953,12 +1148,48 @@ export default function App() {
                 {filteredPrompts.map((prompt) => {
                   const called = calledId === prompt.id;
                   const variableCount = extractTemplateFields(prompt.prompt).length;
+                  const isDraggingPrompt = promptDragActive && draggingPromptId === prompt.id;
+                  const isPromptDropTarget = promptDragActive && dragOverPromptId === prompt.id;
                   return (
 	                    <div key={prompt.id}
-	                      className="group relative rounded-2xl border px-5 py-4 transition-all hover:-translate-y-0.5 flex items-start gap-4"
+                        data-prompt-card-id={prompt.id}
+                        onPointerDown={(event) => handlePromptPointerDown(event, prompt.id)}
+                        onPointerMove={handlePromptPointerMove}
+                        onPointerUp={handlePromptPointerUp}
+                        onPointerCancel={clearPromptDrag}
+	                      className={`group relative rounded-2xl border px-5 py-4 flex items-start gap-4 ${isDraggingPrompt ? 'opacity-90 z-20' : 'transition-all hover:-translate-y-0.5'} ${isPromptDropTarget ? 'ring-2 ring-[#3b63ff]/35' : ''}`}
 	                      style={{ background: 'rgba(255,255,255,0.85)', backdropFilter: 'blur(10px)',
-	                        borderColor: called ? '#3b63ff' : 'rgba(226,232,240,0.8)',
-	                        boxShadow: called ? '0 8px 28px rgba(59,99,255,0.22)' : '0 4px 16px rgba(15,23,42,0.04)' }}>
+	                        borderColor: isPromptDropTarget || isDraggingPrompt ? '#3b63ff' : called ? '#3b63ff' : 'rgba(226,232,240,0.8)',
+	                        boxShadow: isDraggingPrompt
+                            ? '0 22px 42px rgba(59,99,255,0.32)'
+                            : called ? '0 8px 28px rgba(59,99,255,0.22)' : '0 4px 16px rgba(15,23,42,0.04)',
+                          cursor: searchQuery.trim() ? 'default' : isDraggingPrompt ? 'grabbing' : 'grab',
+                          transform: isDraggingPrompt
+                            ? `translate3d(${promptDragOffset.x}px, ${promptDragOffset.y}px, 0) scale(1.02)`
+                            : undefined,
+                          transition: isDraggingPrompt ? 'box-shadow 120ms ease, opacity 120ms ease' : undefined,
+                          willChange: isDraggingPrompt ? 'transform' : undefined,
+                          pointerEvents: isDraggingPrompt ? 'none' : undefined,
+                          userSelect: 'none',
+                          WebkitUserSelect: 'none',
+                          touchAction: 'none' }}>
+                        {isPromptDropTarget && (
+                          <div className="pointer-events-none absolute -top-2 left-5 right-5 flex items-center gap-2">
+                            <span className="h-1.5 flex-1 rounded-full" style={{ background: 'linear-gradient(90deg,#3b63ff,#6366f1)' }} />
+                            <span className="rounded-full px-2 py-0.5 text-white"
+                              style={{ fontSize: 10, fontWeight: 700, background: '#3b63ff',
+                                boxShadow: '0 6px 14px rgba(59,99,255,0.25)' }}>
+                              放到这里
+                            </span>
+                          </div>
+                        )}
+                        {isDraggingPrompt && (
+                          <div className="pointer-events-none absolute -right-2 -top-2 rounded-full px-2.5 py-1 text-white"
+                            style={{ fontSize: 10, fontWeight: 700, background: '#0f172a',
+                              boxShadow: '0 8px 18px rgba(15,23,42,0.18)' }}>
+                            正在移动
+                          </div>
+                        )}
 	                      <div className="flex-1 min-w-0">
 	                        <h3 className="line-clamp-2 mb-1" style={{ fontSize: 15, fontWeight: 600, color: '#0f172a', lineHeight: 1.35 }}>
 	                          {prompt.title}
@@ -977,7 +1208,7 @@ export default function App() {
                           </p>
                         )}
                       </div>
-	                      <div className="shrink-0 flex flex-col items-center gap-2">
+	                      <div className="shrink-0 flex flex-col items-center gap-2" data-no-prompt-drag>
 	                        <button onClick={() => handleCall(prompt)}
 	                          className="inline-flex items-center gap-1.5 rounded-full transition-all active:scale-95 hover:-translate-y-0.5"
 	                          style={{ padding: '8px 14px', fontSize: 12.5, fontWeight: 500, color: '#fff',
@@ -1174,23 +1405,47 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="flex justify-end gap-2 px-6 py-4 border-t" style={{ borderColor: '#f1f5f9' }}>
-              <button onClick={undoLastCall}
-                className="inline-flex items-center gap-1.5 rounded-full border px-5 py-2 transition-colors hover:bg-slate-50"
-                style={{ fontSize: 13, borderColor: '#e2e8f0', color: '#475569' }}>
-                <Undo2 className="w-3.5 h-3.5" />上一次调用
-              </button>
-              <Dialog.Close
-                className="rounded-full border px-5 py-2 transition-colors hover:bg-slate-50"
-                style={{ fontSize: 13, borderColor: '#e2e8f0', color: '#475569' }}>
-                取消
-              </Dialog.Close>
-              <button onClick={submitTemplateCall}
-                className="inline-flex items-center gap-1.5 rounded-full text-white px-5 py-2 transition-all hover:-translate-y-0.5"
-                style={{ fontSize: 13, background: 'linear-gradient(135deg,#3b63ff,#6366f1)',
-                  boxShadow: '0 4px 14px rgba(59,99,255,0.28)' }}>
-                <Send className="w-3.5 h-3.5" />调用
-              </button>
+            <div className="flex flex-col items-end gap-1.5 px-6 pt-4 pb-[6px] border-t" style={{ borderColor: '#f1f5f9' }}>
+              {configuredProviders.length > 0 && (
+                <div className="relative w-[300px] max-w-full">
+                  <select
+                    value={activeCallProvider}
+                    onChange={(event) => setCallProvider(event.target.value)}
+                    className="w-full appearance-none rounded-full border focus:outline-none"
+                    style={{ height: 42, padding: '0 42px 0 16px', fontSize: 13, fontWeight: 700,
+                      background: '#0f172a', color: '#fff', borderColor: '#0f172a',
+                      boxShadow: '0 4px 14px rgba(15,23,42,0.18)' }}>
+                    {configuredProviders.map(item => {
+                      const config = providerConfigs[item.id];
+                      return (
+                        <option key={item.id} value={item.id}>
+                          {config.model || item.placeholder}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4"
+                    style={{ color: '#fff' }} />
+                </div>
+              )}
+              <div className="flex w-[300px] max-w-full items-center justify-between gap-2">
+                <button onClick={undoLastCall}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-full border py-2 transition-colors hover:bg-slate-50 whitespace-nowrap"
+                  style={{ width: 120, paddingLeft: 14, paddingRight: 14, fontSize: 13, borderColor: '#e2e8f0', color: '#475569' }}>
+                  <Undo2 className="w-3.5 h-3.5 shrink-0" />上一次调用
+                </button>
+                <Dialog.Close
+                  className="rounded-full border py-2 transition-colors hover:bg-slate-50 whitespace-nowrap"
+                  style={{ width: 72, paddingLeft: 14, paddingRight: 14, fontSize: 13, borderColor: '#e2e8f0', color: '#475569' }}>
+                  取消
+                </Dialog.Close>
+                <button onClick={submitTemplateCall}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-full text-white py-2 transition-all hover:-translate-y-0.5 whitespace-nowrap"
+                  style={{ width: 92, paddingLeft: 14, paddingRight: 14, fontSize: 13, background: 'linear-gradient(135deg,#3b63ff,#6366f1)',
+                    boxShadow: '0 4px 14px rgba(59,99,255,0.28)' }}>
+                  <Send className="w-3.5 h-3.5 shrink-0" />调用
+                </button>
+              </div>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
@@ -1285,7 +1540,7 @@ export default function App() {
                     <label style={{ fontSize: 11, color: '#64748b' }}>服务商</label>
                     <div className="grid grid-cols-4 gap-1.5 mt-1.5">
                       {PROVIDERS.map(p => (
-                        <button key={p.id} onClick={() => { setProvider(p.id); setModel(p.placeholder); }}
+                        <button key={p.id} onClick={() => setProvider(p.id)}
                           className="rounded-lg border transition-all"
                           style={{ padding: '7px 8px', fontSize: 12,
                             borderColor: provider === p.id ? '#0f172a' : '#e2e8f0',
@@ -1298,21 +1553,21 @@ export default function App() {
                   </div>
                   <div>
                     <label style={{ fontSize: 11, color: '#64748b' }}>模型</label>
-                    <input value={model} onChange={(e) => setModel(e.target.value)}
-                      placeholder="model-name"
+                    <input value={currentProviderConfig.model} onChange={(e) => updateProviderConfig(provider, { model: e.target.value })}
+                      placeholder={PROVIDERS.find(item => item.id === provider)?.placeholder || 'model-name'}
                       className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a]"
                       style={{ fontSize: 13, borderColor: '#e2e8f0' }} />
                   </div>
                   <div>
                     <label style={{ fontSize: 11, color: '#64748b' }}>API Key</label>
-                    <input value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+                    <input value={currentProviderConfig.apiKey} onChange={(e) => updateProviderConfig(provider, { apiKey: e.target.value })}
                       type="password" placeholder="sk-..."
                       className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a]"
                       style={{ fontSize: 13, borderColor: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }} />
                   </div>
                   <div>
                     <label style={{ fontSize: 11, color: '#64748b' }}>Base URL（可选）</label>
-                    <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)}
+                    <input value={currentProviderConfig.baseUrl} onChange={(e) => updateProviderConfig(provider, { baseUrl: e.target.value })}
                       placeholder="https://api.example.com/v1"
                       className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a]"
                       style={{ fontSize: 13, borderColor: '#e2e8f0' }} />

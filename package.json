@@ -6,7 +6,9 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 127.0.0.1",
-    "test": "node src/app/promptExcel.test.mjs && node src/app/promptTemplate.test.mjs && node src/app/App.ai-rewrite.test.mjs && node tools/prompt-manager-mac/main-source.test.mjs && node tools/prompt-manager-mac/login-item.test.mjs"
+    "package:mac": "tools/prompt-manager-mac/build-dmg.sh",
+    "package:windows": "node tools/prompt-manager-windows/build.mjs",
+    "test": "node src/app/promptExcel.test.mjs && node src/app/promptTemplate.test.mjs && node src/app/App.ai-rewrite.test.mjs && node tools/prompt-manager-mac/main-source.test.mjs && node tools/prompt-manager-mac/login-item.test.mjs && node tools/prompt-manager-mac/build-script.test.mjs && node tools/prompt-manager-mac/dmg-script.test.mjs && node tools/prompt-manager-mac/icon-asset.test.mjs && node tools/prompt-manager-windows/build-script.test.mjs && node tools/ci-build-installers.test.mjs"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
@@ -72,6 +74,8 @@
   "devDependencies": {
     "@tailwindcss/vite": "4.1.12",
     "@vitejs/plugin-react": "4.7.0",
+    "electron": "33.4.11",
+    "electron-builder": "25.1.8",
     "tailwindcss": "4.1.12",
     "vite": "6.3.5"
   },

@@ -1,0 +1,87 @@
+name: Build Installers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Run tests
+        run: npm test
+
+  build-mac:
+    name: Build macOS DMG
+    runs-on: macos-14
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Build DMG
+        run: npm run package:mac
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PromptManager-macOS
+          path: tools/prompt-manager-mac/dist/*.dmg
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        run: npm run package:windows
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PromptManager-Windows
+          path: tools/prompt-manager-windows/dist/*.exe
+          if-no-files-found: error

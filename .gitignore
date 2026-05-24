@@ -1,5 +1,6 @@
 node_modules/
 dist/
 tools/prompt-manager-mac/build/
+tools/prompt-manager-windows/dist/
 .DS_Store
 *.log

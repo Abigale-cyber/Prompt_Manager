@@ -1,4 +1,5 @@
 const FIELD_PATTERN = /\{\{\s*([^{}\n]+?)\s*\}\}/g;
+const LEGACY_FIELD_PATTERN = /\[\s*([^\[\]\n]+?)\s*\](?!\()/g;
 
 const COLUMN_ALIASES = {
   category: ['category', '分类'],
@@ -13,20 +14,39 @@ const COLUMN_ALIASES = {
 export function extractTemplateFields(prompt) {
   const fields = [];
   const seen = new Set();
-  for (const match of String(prompt || '').matchAll(FIELD_PATTERN)) {
+  collectTemplateFields(String(prompt || ''), FIELD_PATTERN, fields, seen);
+  collectTemplateFields(String(prompt || ''), LEGACY_FIELD_PATTERN, fields, seen);
+  return fields;
+}
+
+export function fillPromptTemplate(prompt, values) {
+  const replaceField = (_match, rawName) => {
+    const name = String(rawName || '').trim();
+    return values?.[name] ?? '';
+  };
+  return String(prompt || '')
+    .replace(FIELD_PATTERN, replaceField)
+    .replace(LEGACY_FIELD_PATTERN, replaceField);
+}
+
+function collectTemplateFields(prompt, pattern, fields, seen) {
+  for (const match of prompt.matchAll(pattern)) {
     const name = match[1].trim();
     if (!name || seen.has(name)) continue;
     seen.add(name);
     fields.push(name);
   }
-  return fields;
 }
 
-export function fillPromptTemplate(prompt, values) {
-  return String(prompt || '').replace(FIELD_PATTERN, (_match, rawName) => {
-    const name = String(rawName || '').trim();
-    return values?.[name] ?? '';
-  });
+export function moveItemById(items, sourceId, targetId) {
+  if (sourceId === targetId) return Array.isArray(items) ? [...items] : [];
+  const next = Array.isArray(items) ? [...items] : [];
+  const sourceIndex = next.findIndex((item) => item?.id === sourceId);
+  const targetIndex = next.findIndex((item) => item?.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return next;
+  const [moved] = next.splice(sourceIndex, 1);
+  next.splice(targetIndex, 0, moved);
+  return next;
 }
 
 export function normalizeImportedPromptRows(rows) {

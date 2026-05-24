@@ -3,6 +3,7 @@ import {
   extractTemplateFields,
   fillPromptTemplate,
   mergeImportedPromptRows,
+  moveItemById,
   normalizeImportedPromptRows,
   parseCsvRows,
   tableRowsToObjects,
@@ -13,12 +14,42 @@ assert.deepEqual(
   ['文章主题', '原文内容'],
 );
 
+assert.deepEqual(
+  extractTemplateFields('请重构以下代码：\n[在此粘贴代码]\n输出 Markdown 链接：[文档](https://example.com)'),
+  ['在此粘贴代码'],
+);
+
 assert.equal(
   fillPromptTemplate('主题：{{文章主题}}\n原文：{{ 原文内容 }}', {
     文章主题: '效率工具',
     原文内容: '原始正文',
   }),
   '主题：效率工具\n原文：原始正文',
+);
+
+assert.equal(
+  fillPromptTemplate('请重构以下代码：\n[在此粘贴代码]\n保留链接：[文档](https://example.com)', {
+    在此粘贴代码: 'const value = 1;',
+  }),
+  '请重构以下代码：\nconst value = 1;\n保留链接：[文档](https://example.com)',
+);
+
+assert.deepEqual(
+  moveItemById(
+    [{ id: 1, title: 'A' }, { id: 2, title: 'B' }, { id: 3, title: 'C' }],
+    3,
+    1,
+  ).map(item => item.id),
+  [3, 1, 2],
+);
+
+assert.deepEqual(
+  moveItemById(
+    [{ id: 1, title: 'A' }, { id: 2, title: 'B' }, { id: 3, title: 'C' }],
+    1,
+    3,
+  ).map(item => item.id),
+  [2, 3, 1],
 );
 
 assert.deepEqual(

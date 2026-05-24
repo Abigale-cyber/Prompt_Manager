@@ -7,10 +7,14 @@ APP_DIR="$ROOT_DIR/build/PromptManager.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 PLIST="$APP_DIR/Contents/Info.plist"
+ICON_FILE="PromptManager.icns"
+ICON_SOURCE="$ROOT_DIR/Assets/$ICON_FILE"
+MENU_BAR_ICON_FILE="PromptManagerMenuBar.png"
+MENU_BAR_ICON_SOURCE="$ROOT_DIR/Assets/$MENU_BAR_ICON_FILE"
 
+rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
-rm -f "$MACOS_DIR/PromptManager"
 
 cd "$PROJECT_DIR"
 npm run build
@@ -19,6 +23,8 @@ rm -rf "$RESOURCES_DIR/web"
 mkdir -p "$RESOURCES_DIR/web"
 cp -R "$PROJECT_DIR/dist/." "$RESOURCES_DIR/web/"
 cp "$RESOURCES_DIR/web/index.html" "$RESOURCES_DIR/web/launcher.html"
+cp "$ICON_SOURCE" "$RESOURCES_DIR/$ICON_FILE"
+cp "$MENU_BAR_ICON_SOURCE" "$RESOURCES_DIR/$MENU_BAR_ICON_FILE"
 
 swiftc "$ROOT_DIR/Sources/main.swift" \
   -framework AppKit \
@@ -39,18 +45,20 @@ cat > "$PLIST" <<'PLIST'
   <string>PromptManager</string>
   <key>CFBundleIdentifier</key>
   <string>com.local.promptmanager</string>
+  <key>CFBundleIconFile</key>
+  <string>PromptManager</string>
+  <key>CFBundleDisplayName</key>
+  <string>Prompt Manager</string>
   <key>CFBundleName</key>
-  <string>Prompt 管理器</string>
+  <string>Prompt Manager</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
   <string>0.1.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>3</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
-  <key>LSUIElement</key>
-  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
