@@ -19,6 +19,13 @@ assert.match(workflow, /npm run package:mac/);
 assert.match(workflow, /npm run package:windows/);
 assert.match(workflow, /tools\/prompt-manager-mac\/dist\/\*\.dmg/);
 assert.match(workflow, /tools\/prompt-manager-windows\/dist\/\*\.exe/);
+assert.match(workflow, /contents:\s*write/);
+assert.match(workflow, /name:\s*Publish latest installers/);
+assert.match(workflow, /actions\/download-artifact@v4/);
+assert.match(workflow, /PromptManager-macOS\.dmg/);
+assert.match(workflow, /PromptManager-Windows-x64\.exe/);
+assert.match(workflow, /gh release upload latest release-assets\/final\/\* --clobber/);
+assert.match(workflow, /gh release edit latest --latest/);
 
 assert.equal(packageJson.scripts['package:mac'], 'tools/prompt-manager-mac/build-dmg.sh');
 assert.equal(packageJson.scripts['package:windows'], 'node tools/prompt-manager-windows/build.mjs');

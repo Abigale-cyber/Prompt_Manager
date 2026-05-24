@@ -4,21 +4,19 @@ Prompt Manager 是一个本地 Prompt 管理工具。它可以把常用 Prompt �
 
 ## 下载安装
 
-安装包由 GitHub Actions 自动构建：
+安装包由 GitHub Actions 自动构建，并发布到 GitHub Releases：
 
-1. 打开仓库顶部的 **Actions**。
-2. 进入最新成功的 **Build Installers** 工作流。
-3. 在页面底部 **Artifacts** 下载对应安装包。
+| 系统 | 安装包 | 下载 |
+|---|---|---|
+| Mac | `PromptManager-macOS.dmg` | [下载 Mac 安装包](https://github.com/Abigale-cyber/Prompt_Manager/releases/latest/download/PromptManager-macOS.dmg) |
+| Windows | `PromptManager-Windows-x64.exe` | [下载 Windows 安装包](https://github.com/Abigale-cyber/Prompt_Manager/releases/latest/download/PromptManager-Windows-x64.exe) |
 
-可下载的安装包：
-
-- **Mac**：`PromptManager-macOS`，里面包含 `PromptManager-0.0.1.dmg`
-- **Windows**：`PromptManager-Windows`，里面包含 `PromptManager-0.0.1-x64.exe`
+如果下载链接暂时不可用，说明最新构建还没有完成。可以打开仓库顶部的 **Actions**，进入最新成功的 **Build Installers** 工作流，在页面底部 **Artifacts** 下载对应安装包。
 
 ## Mac 安装
 
-1. 下载并解压 `PromptManager-macOS`。
-2. 打开 `PromptManager-0.0.1.dmg`。
+1. 下载 `PromptManager-macOS.dmg`。
+2. 打开 `PromptManager-macOS.dmg`。
 3. 把 `PromptManager.app` 拖到 `Applications`。
 4. 从 `Applications` 启动 `PromptManager.app`。
 
@@ -26,8 +24,8 @@ Prompt Manager 是一个本地 Prompt 管理工具。它可以把常用 Prompt �
 
 ## Windows 安装
 
-1. 下载并解压 `PromptManager-Windows`。
-2. 运行 `PromptManager-0.0.1-x64.exe`。
+1. 下载 `PromptManager-Windows-x64.exe`。
+2. 运行 `PromptManager-Windows-x64.exe`。
 3. 按安装向导完成安装。
 4. 从开始菜单或桌面快捷方式启动 `Prompt Manager`。
 

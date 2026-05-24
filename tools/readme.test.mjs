@@ -4,10 +4,12 @@ import fs from 'node:fs';
 const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 
 assert.match(readme, /## 下载安装/);
-assert.match(readme, /PromptManager-macOS/);
-assert.match(readme, /PromptManager-Windows/);
-assert.match(readme, /PromptManager-0\.0\.1\.dmg/);
-assert.match(readme, /PromptManager-0\.0\.1-x64\.exe/);
+assert.match(readme, /PromptManager-macOS\.dmg/);
+assert.match(readme, /PromptManager-Windows-x64\.exe/);
+assert.match(readme, /releases\/latest\/download\/PromptManager-macOS\.dmg/);
+assert.match(readme, /releases\/latest\/download\/PromptManager-Windows-x64\.exe/);
+assert.match(readme, /Actions/);
+assert.match(readme, /Artifacts/);
 assert.match(readme, /## 使用方法/);
 assert.match(readme, /Mac 安装/);
 assert.match(readme, /Windows 安装/);
