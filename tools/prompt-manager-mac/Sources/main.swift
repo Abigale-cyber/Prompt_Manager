@@ -1390,6 +1390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var sourceAppForPromptWindow: NSRunningApplication?
     private var lastTargetApp: NSRunningApplication?
     private var activationObserver: NSObjectProtocol?
+    private let targetPasteDelay: TimeInterval = 0.18
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -1579,7 +1580,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSLog("PromptManager use prompt target: \(targetApp.localizedName ?? "unknown") pid=\(targetApp.processIdentifier)")
         targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        pastePromptIntoTargetApp(targetApp, attempt: 0, shortcut: .paste)
+        DispatchQueue.main.asyncAfter(deadline: .now() + targetPasteDelay) { [weak self] in
+            self?.pastePromptIntoTargetApp(targetApp, attempt: 0, shortcut: .paste)
+        }
     }
 
     private func pastePromptIntoTargetApp(_ targetApp: NSRunningApplication, attempt: Int, shortcut: TargetShortcut) {
@@ -1596,42 +1599,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSLog("PromptManager posting shortcut \(shortcut): target=\(targetApp.localizedName ?? "unknown") frontmost=\(frontmost?.localizedName ?? "none") attempt=\(attempt)")
         if shortcut == .paste {
-            let pendingPromptText = NSPasteboard.general.string(forType: .string) ?? ""
-            if !pendingPromptText.isEmpty {
-                if !shouldUseKeyboardPaste(for: targetApp),
-                   insertPrompt(pendingPromptText, intoFocusedElementOf: targetApp) {
-                    return
-                }
+            if postKeyboardShortcut(shortcut, to: targetApp) {
+                return
             }
-        }
-
-        if !postKeyboardShortcut(shortcut), shortcut == .paste {
+            let pendingPromptText = NSPasteboard.general.string(forType: .string) ?? ""
+            if !pendingPromptText.isEmpty,
+               insertPrompt(pendingPromptText, intoFocusedElementOf: targetApp) {
+                return
+            }
             pasteWithAppleScriptFallback()
         }
-    }
-
-    private func shouldUseKeyboardPaste(for app: NSRunningApplication) -> Bool {
-        guard let bundleIdentifier = app.bundleIdentifier else {
-            return false
-        }
-
-        let keyboardPasteBundleIdentifiers: Set<String> = [
-            "co.zeit.hyper",
-            "com.apple.Terminal",
-            "com.exafunction.windsurf",
-            "com.github.wez.wezterm",
-            "com.googlecode.iterm2",
-            "com.microsoft.VSCode",
-            "com.microsoft.VSCodeInsiders",
-            "com.mitchellh.ghostty",
-            "com.todesktop.230313mzl4w4u92",
-            "dev.warp.Warp-Preview",
-            "dev.warp.Warp-Stable",
-            "net.kovidgoyal.kitty",
-            "org.alacritty"
-        ]
-
-        return keyboardPasteBundleIdentifiers.contains(bundleIdentifier)
     }
 
     private func insertPrompt(_ prompt: String, intoFocusedElementOf app: NSRunningApplication) -> Bool {
@@ -1681,7 +1658,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         postKeyboardShortcut(.paste)
     }
 
-    private func postKeyboardShortcut(_ shortcut: TargetShortcut) -> Bool {
+    private func postKeyboardShortcut(_ shortcut: TargetShortcut, to app: NSRunningApplication? = nil) -> Bool {
         guard
             let source = CGEventSource(stateID: .combinedSessionState),
             let keyDown = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true),
@@ -1692,8 +1669,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        if let app {
+            keyDown.postToPid(app.processIdentifier)
+            keyUp.postToPid(app.processIdentifier)
+        } else {
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+        }
         return true
     }
 
