@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 import WebKit
 
 struct PromptItem: Codable {
+    let requestId: String?
     let id: Int
     let title: String
     let description: String
@@ -66,8 +67,9 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
     private let webView: WKWebView
     private var isFrontendLoaded = false
     private var pendingPromptFetches: [([PromptItem]) -> Void] = []
+    private var activeAIChatCompletionTasks: [String: URLSessionDataTask] = [:]
     private let frameDefaultsKey = "prompt-manager.window-frame.v1"
-    var onUsePrompt: ((PromptItem) -> Void)?
+    var onUsePrompt: ((PromptItem, @escaping (Bool, String) -> Void) -> Void)?
 
     init() {
         let configuration = WKWebViewConfiguration()
@@ -102,6 +104,8 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         webView.configuration.userContentController.add(self, name: "importFile")
         webView.configuration.userContentController.add(self, name: "usePrompt")
         webView.configuration.userContentController.add(self, name: "aiChatCompletion")
+        webView.configuration.userContentController.add(self, name: "cancelAIChatCompletion")
+        webView.configuration.userContentController.add(self, name: "launchAtLogin")
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -131,6 +135,8 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "importFile")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "usePrompt")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "aiChatCompletion")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "cancelAIChatCompletion")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "launchAtLogin")
     }
 
     func showTool(over app: NSRunningApplication? = nil) {
@@ -457,7 +463,9 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
                 return
             }
 
-            onUsePrompt?(PromptItem(
+            let requestId = body["requestId"] as? String ?? ""
+            let item = PromptItem(
+                requestId: requestId.isEmpty ? nil : requestId,
                 id: body["id"] as? Int ?? 0,
                 title: body["title"] as? String ?? "Prompt",
                 description: body["description"] as? String ?? "",
@@ -465,13 +473,28 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
                 categoryId: body["categoryId"] as? String ?? "",
                 categoryLabel: "",
                 usageCount: 0
-            ))
+            )
+            onUsePrompt?(item) { [weak self] ok, message in
+                self?.notifyUsePromptResult(requestId: requestId, ok: ok, message: message)
+            }
             return
         }
 
         if message.name == "aiChatCompletion" {
             guard let body = message.body as? [String: Any] else { return }
             performAIChatCompletion(body)
+            return
+        }
+
+        if message.name == "cancelAIChatCompletion" {
+            guard let body = message.body as? [String: Any] else { return }
+            cancelAIChatCompletion(body)
+            return
+        }
+
+        if message.name == "launchAtLogin" {
+            guard let body = message.body as? [String: Any] else { return }
+            updateLaunchAtLogin(body)
             return
         }
 
@@ -495,7 +518,6 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
             let requestId = body["requestId"] as? String,
             let endpoint = body["endpoint"] as? String,
             let url = URL(string: endpoint),
-            let apiKey = body["apiKey"] as? String,
             let requestBody = body["body"] as? [String: Any]
         else {
             notifyAIChatCompletionResult(
@@ -510,15 +532,35 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
 
         do {
             let data = try JSONSerialization.data(withJSONObject: requestBody, options: [])
+            let headers = body["headers"] as? [String: String] ?? [:]
+            let apiKey = body["apiKey"] as? String
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = 60
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            if headers.isEmpty {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                if let apiKey {
+                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                }
+            } else {
+                headers.forEach { field, value in
+                    request.setValue(value, forHTTPHeaderField: field)
+                }
+            }
             request.httpBody = data
 
-            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            NSLog("PromptManager AI request started: requestId=%@ endpoint=%@", requestId, endpoint)
+            let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                DispatchQueue.main.async {
+                    self?.activeAIChatCompletionTasks[requestId] = nil
+                }
+
                 if let error {
+                    if let urlError = error as? URLError, urlError.code == .cancelled {
+                        NSLog("PromptManager AI request cancelled: requestId=%@", requestId)
+                        return
+                    }
+                    NSLog("PromptManager AI request failed: requestId=%@ error=%@", requestId, error.localizedDescription)
                     self?.notifyAIChatCompletionResult(
                         requestId: requestId,
                         ok: false,
@@ -531,6 +573,7 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
 
                 let status = (response as? HTTPURLResponse)?.statusCode
                 let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                NSLog("PromptManager AI request completed: requestId=%@ status=%d", requestId, status ?? -1)
                 self?.notifyAIChatCompletionResult(
                     requestId: requestId,
                     ok: status.map { (200...299).contains($0) } ?? false,
@@ -538,7 +581,9 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
                     body: responseBody,
                     message: nil
                 )
-            }.resume()
+            }
+            activeAIChatCompletionTasks[requestId] = task
+            task.resume()
         } catch {
             notifyAIChatCompletionResult(
                 requestId: requestId,
@@ -548,6 +593,19 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
                 message: error.localizedDescription
             )
         }
+    }
+
+    private func cancelAIChatCompletion(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? String ?? ""
+        guard !requestId.isEmpty else { return }
+
+        guard let task = activeAIChatCompletionTasks.removeValue(forKey: requestId) else {
+            NSLog("PromptManager AI request cancel skipped: requestId=%@", requestId)
+            return
+        }
+
+        task.cancel()
+        NSLog("PromptManager AI request cancelled: requestId=%@", requestId)
     }
 
     private func notifyAIChatCompletionResult(
@@ -580,6 +638,79 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         DispatchQueue.main.async { [weak self] in
             self?.webView.evaluateJavaScript(
                 "window.dispatchEvent(new CustomEvent('prompt-manager-ai-result', { detail: \(json) }));",
+                completionHandler: nil
+            )
+        }
+    }
+
+    private func notifyUsePromptResult(requestId: String, ok: Bool, message: String) {
+        guard !requestId.isEmpty else { return }
+        let detail: [String: Any] = [
+            "requestId": requestId,
+            "ok": ok,
+            "message": message,
+        ]
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: detail, options: []),
+            let json = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(
+                "window.dispatchEvent(new CustomEvent('prompt-manager-use-prompt-result', { detail: \(json) }));",
+                completionHandler: nil
+            )
+        }
+    }
+
+    private func updateLaunchAtLogin(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? String ?? ""
+        let enabled = body["enabled"] as? Bool ?? false
+
+        do {
+            let syncedEnabled = try LaunchAtLoginController.setEnabled(enabled)
+            notifyLaunchAtLoginResult(
+                requestId: requestId,
+                ok: true,
+                enabled: syncedEnabled,
+                message: nil
+            )
+        } catch {
+            notifyLaunchAtLoginResult(
+                requestId: requestId,
+                ok: false,
+                enabled: LaunchAtLoginController.isEnabled,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func notifyLaunchAtLoginResult(
+        requestId: String,
+        ok: Bool,
+        enabled: Bool,
+        message: String?
+    ) {
+        var detail: [String: Any] = [
+            "requestId": requestId,
+            "ok": ok,
+            "enabled": enabled,
+        ]
+        if let message {
+            detail["message"] = message
+        }
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: detail, options: []),
+            let json = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(
+                "window.dispatchEvent(new CustomEvent('prompt-manager-launch-at-login-result', { detail: \(json) }));",
                 completionHandler: nil
             )
         }
@@ -712,6 +843,100 @@ func jsString(_ string: String) -> String {
     return "\"\(escaped)\""
 }
 
+enum LaunchAtLoginController {
+    private static let label = "com.local.promptmanager"
+    private static var plistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(label).plist")
+    }
+
+    static var isEnabled: Bool {
+        FileManager.default.fileExists(atPath: plistURL.path)
+    }
+
+    @discardableResult
+    static func setEnabled(_ enabled: Bool) throws -> Bool {
+        if enabled {
+            try writePlist()
+            try runLaunchctl(["bootout", guiDomain, plistURL.path], allowsFailure: true)
+            try runLaunchctl(["bootstrap", guiDomain, plistURL.path])
+            try runLaunchctl(["enable", "\(guiDomain)/\(label)"])
+        } else {
+            try runLaunchctl(["bootout", guiDomain, plistURL.path], allowsFailure: true)
+            if FileManager.default.fileExists(atPath: plistURL.path) {
+                try FileManager.default.removeItem(at: plistURL)
+            }
+        }
+        return isEnabled
+    }
+
+    private static var guiDomain: String {
+        "gui/\(getuid())"
+    }
+
+    private static func writePlist() throws {
+        guard let executablePath = Bundle.main.executablePath else {
+            throw NSError(domain: "PromptManagerLaunchAtLogin", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "找不到应用可执行文件",
+            ])
+        }
+
+        let launchAgentsURL = plistURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: launchAgentsURL, withIntermediateDirectories: true)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key>
+          <string>\(label)</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>\(xmlEscape(executablePath))</string>
+          </array>
+          <key>RunAtLoad</key>
+          <true/>
+          <key>StandardOutPath</key>
+          <string>\(xmlEscape(home))/Library/Logs/PromptManager.log</string>
+          <key>StandardErrorPath</key>
+          <string>\(xmlEscape(home))/Library/Logs/PromptManager.err.log</string>
+        </dict>
+        </plist>
+        """
+        try plist.write(to: plistURL, atomically: true, encoding: .utf8)
+    }
+
+    private static func runLaunchctl(_ arguments: [String], allowsFailure: Bool = false) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 || allowsFailure else {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(domain: "PromptManagerLaunchAtLogin", code: Int(process.terminationStatus), userInfo: [
+                NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "launchctl 执行失败",
+            ])
+        }
+    }
+
+    private static func xmlEscape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+}
+
 final class PromptDataController: NSObject, WKNavigationDelegate {
     private let webView: WKWebView
     private var isFrontendLoaded = false
@@ -825,7 +1050,7 @@ final class PromptDataController: NSObject, WKNavigationDelegate {
 final class PromptReactLauncherController: NSWindowController, WKScriptMessageHandler, WKNavigationDelegate {
     private let webView: WKWebView
     private var sourceApp: NSRunningApplication?
-    var onSelect: ((PromptItem, NSRunningApplication?) -> Void)?
+    var onSelect: ((PromptItem, NSRunningApplication?, @escaping (Bool, String) -> Void) -> Void)?
 
     init() {
         let configuration = WKWebViewConfiguration()
@@ -959,7 +1184,9 @@ final class PromptReactLauncherController: NSWindowController, WKScriptMessageHa
             return
         }
 
+        let requestId = body["requestId"] as? String ?? ""
         let item = PromptItem(
+            requestId: requestId.isEmpty ? nil : requestId,
             id: body["id"] as? Int ?? 0,
             title: body["title"] as? String ?? "Prompt",
             description: body["description"] as? String ?? "",
@@ -970,7 +1197,31 @@ final class PromptReactLauncherController: NSWindowController, WKScriptMessageHa
         )
         let app = sourceApp
         hide()
-        onSelect?(item, app)
+        onSelect?(item, app) { [weak self] ok, message in
+            self?.notifyUsePromptResult(requestId: requestId, ok: ok, message: message)
+        }
+    }
+
+    private func notifyUsePromptResult(requestId: String, ok: Bool, message: String) {
+        guard !requestId.isEmpty else { return }
+        let detail: [String: Any] = [
+            "requestId": requestId,
+            "ok": ok,
+            "message": message,
+        ]
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: detail, options: []),
+            let json = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(
+                "window.dispatchEvent(new CustomEvent('prompt-manager-use-prompt-result', { detail: \(json) }));",
+                completionHandler: nil
+            )
+        }
     }
 }
 
@@ -1389,14 +1640,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalMouseMonitor: Any?
     private var sourceAppForPromptWindow: NSRunningApplication?
     private var lastTargetApp: NSRunningApplication?
+    private let usePromptDedupInterval: TimeInterval = 0.9
+    private let focusSettleDelay: TimeInterval = 0.18
+    private let keyboardPasteSettleDelay: TimeInterval = 0.08
+    private var lastUsePromptAction: (key: String, time: Date)?
     private var activationObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupMainMenu()
         setupStatusItem()
-        launcherController.onSelect = { [weak self] item, sourceApp in
-            self?.usePrompt(item, sourceApp: sourceApp)
+        launcherController.onSelect = { [weak self] item, sourceApp, completion in
+            self?.usePrompt(item, sourceApp: sourceApp, completion: completion)
         }
         rememberTargetApp(NSWorkspace.shared.frontmostApplication)
         requestAccessibilityPermission()
@@ -1430,12 +1685,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Prompt Manager"
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.title = ""
         if let menuBarImage = NSImage(named: "PromptManagerMenuBar") {
             menuBarImage.size = NSSize(width: 18, height: 18)
             item.button?.image = menuBarImage
-            item.button?.imagePosition = .imageLeading
+            item.button?.imagePosition = .imageOnly
         }
 
         let menu = NSMenu()
@@ -1528,11 +1783,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sourceAppForPromptWindow = currentTargetApp()
         let controller = promptController ?? PromptWebController()
         promptController = controller
-        controller.onUsePrompt = { [weak self] item in
+        controller.onUsePrompt = { [weak self] item, completion in
             guard let self else { return }
             let sourceApp = self.sourceAppForPromptWindow
             self.promptController?.window?.orderOut(nil)
-            self.usePrompt(item, sourceApp: sourceApp)
+            self.usePrompt(item, sourceApp: sourceApp, completion: completion)
         }
         controller.showTool()
     }
@@ -1542,11 +1797,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("PromptManager manager requested from: \(sourceAppForPromptWindow?.localizedName ?? "unknown")")
         let controller = promptController ?? PromptWebController()
         promptController = controller
-        controller.onUsePrompt = { [weak self] item in
+        controller.onUsePrompt = { [weak self] item, completion in
             guard let self else { return }
             let sourceApp = self.sourceAppForPromptWindow
             self.promptController?.window?.orderOut(nil)
-            self.usePrompt(item, sourceApp: sourceApp)
+            self.usePrompt(item, sourceApp: sourceApp, completion: completion)
         }
         controller.showTool(over: sourceAppForPromptWindow)
     }
@@ -1567,30 +1822,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func usePrompt(_ item: PromptItem, sourceApp: NSRunningApplication?) {
+    private func usePrompt(_ item: PromptItem, sourceApp: NSRunningApplication?, completion: ((Bool, String) -> Void)? = nil) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(item.prompt, forType: .string)
 
         let targetApp = sourceApp ?? currentTargetApp()
         guard let targetApp, targetApp.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            completion?(false, "调用失败：没有可用的目标应用")
             return
         }
+        let actionKey = "\(targetApp.processIdentifier):\(item.id):\(item.prompt.hashValue)"
+        if let lastUsePromptAction,
+           lastUsePromptAction.key == actionKey,
+           Date().timeIntervalSince(lastUsePromptAction.time) < usePromptDedupInterval {
+            NSLog("PromptManager ignored duplicate prompt call: target=\(targetApp.localizedName ?? "unknown")")
+            completion?(false, "重复调用已忽略")
+            return
+        }
+        lastUsePromptAction = (key: actionKey, time: Date())
         rememberTargetApp(targetApp)
 
         NSLog("PromptManager use prompt target: \(targetApp.localizedName ?? "unknown") pid=\(targetApp.processIdentifier)")
         targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        pastePromptIntoTargetApp(targetApp, attempt: 0, shortcut: .paste)
+        let settleDelay = shouldUseKeyboardPaste(for: targetApp) ? keyboardPasteSettleDelay : focusSettleDelay
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
+            self.pastePromptIntoTargetApp(targetApp, attempt: 0, shortcut: .paste, requestId: item.requestId, completion: completion)
+        }
     }
 
-    private func pastePromptIntoTargetApp(_ targetApp: NSRunningApplication, attempt: Int, shortcut: TargetShortcut) {
+    private func pastePromptIntoTargetApp(_ targetApp: NSRunningApplication, attempt: Int, shortcut: TargetShortcut, requestId: String?, completion: ((Bool, String) -> Void)? = nil) {
         let frontmost = NSWorkspace.shared.frontmostApplication
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier != targetApp.processIdentifier,
-           attempt < 12 {
-            NSLog("PromptManager waiting target foreground: target=\(targetApp.localizedName ?? "unknown") frontmost=\(frontmost?.localizedName ?? "none") attempt=\(attempt)")
-            targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                self.pastePromptIntoTargetApp(targetApp, attempt: attempt + 1, shortcut: shortcut)
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != targetApp.processIdentifier {
+            if attempt < 12 {
+                NSLog("PromptManager waiting target foreground: target=\(targetApp.localizedName ?? "unknown") frontmost=\(frontmost?.localizedName ?? "none") attempt=\(attempt)")
+                targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    self.pastePromptIntoTargetApp(targetApp, attempt: attempt + 1, shortcut: shortcut, requestId: requestId, completion: completion)
+                }
+                return
             }
+            NSLog("PromptManager prompt call failed: target not foreground requestId=\(requestId ?? "")")
+            notifyUsePromptResult(requestId: requestId, ok: false, message: "调用失败：目标应用未激活")
+            completion?(false, "调用失败：目标应用未激活")
             return
         }
 
@@ -1600,14 +1873,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !pendingPromptText.isEmpty {
                 if !shouldUseKeyboardPaste(for: targetApp),
                    insertPrompt(pendingPromptText, intoFocusedElementOf: targetApp) {
+                    NSLog("PromptManager prompt inserted via accessibility: target=\(targetApp.localizedName ?? "unknown") requestId=\(requestId ?? "")")
+                    notifyUsePromptResult(requestId: requestId, ok: true, message: "Prompt 已调用")
+                    completion?(true, "Prompt 已调用")
+                    return
+                }
+                if !shouldUseKeyboardPaste(for: targetApp), attempt < 15 {
+                    NSLog("PromptManager retrying prompt insert: target=\(targetApp.localizedName ?? "unknown") attempt=\(attempt)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + focusSettleDelay) {
+                        self.pastePromptIntoTargetApp(targetApp, attempt: attempt + 1, shortcut: shortcut, requestId: requestId, completion: completion)
+                    }
                     return
                 }
             }
         }
 
-        if !postKeyboardShortcut(shortcut), shortcut == .paste {
-            pasteWithAppleScriptFallback()
+        if postKeyboardShortcut(shortcut) {
+            NSLog("PromptManager prompt paste shortcut posted: target=\(targetApp.localizedName ?? "unknown") requestId=\(requestId ?? "")")
+            notifyUsePromptResult(requestId: requestId, ok: true, message: "Prompt 已调用")
+            completion?(true, "Prompt 已调用")
+            return
         }
+
+        if shortcut == .paste, pasteWithAppleScriptFallback() {
+            NSLog("PromptManager prompt paste AppleScript posted: target=\(targetApp.localizedName ?? "unknown") requestId=\(requestId ?? "")")
+            notifyUsePromptResult(requestId: requestId, ok: true, message: "Prompt 已调用")
+            completion?(true, "Prompt 已调用")
+            return
+        }
+
+        NSLog("PromptManager prompt call failed: paste shortcut unavailable requestId=\(requestId ?? "")")
+        notifyUsePromptResult(requestId: requestId, ok: false, message: "调用失败：无法发送粘贴快捷键")
+        completion?(false, "调用失败：无法发送粘贴快捷键")
     }
 
     private func shouldUseKeyboardPaste(for app: NSRunningApplication) -> Bool {
@@ -1624,6 +1921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "com.microsoft.VSCode",
             "com.microsoft.VSCodeInsiders",
             "com.mitchellh.ghostty",
+            "com.openai.codex",
             "com.todesktop.230313mzl4w4u92",
             "dev.warp.Warp-Preview",
             "dev.warp.Warp-Stable",
@@ -1697,16 +1995,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    private func pasteWithAppleScriptFallback() {
+    private func pasteWithAppleScriptFallback() -> Bool {
         var error: NSDictionary?
         let script = NSAppleScript(source: "tell application \"System Events\" to keystroke \"v\" using command down")
         script?.executeAndReturnError(&error)
 
         if error == nil {
-            return
+            return true
         }
 
         NSLog("PromptManager AppleScript paste failed: \(String(describing: error))")
+        return false
+    }
+
+    private func notifyUsePromptResult(requestId: String?, ok: Bool, message: String) {
+        guard let requestId, !requestId.isEmpty else { return }
+        NSLog("PromptManager use prompt result: requestId=\(requestId) ok=\(ok) message=\(message)")
     }
 
     @objc private func quit() {

@@ -3,8 +3,11 @@ import * as Tabs from '@radix-ui/react-tabs';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
 import { Search, Sparkles, Megaphone, Folder, Rows3, Columns2, Send, Settings, X, Check, Plus, Pencil, Trash2, Undo2, ChevronDown, ChevronUp, FileText, History } from 'lucide-react';
+import { aiCompletionEndpoint, buildAIRequestConfig, parseAICompletionText, resolveAIRequestProvider } from './aiProviderRequest.js';
+import { buildAIRewritePayload } from './aiRewritePayload.js';
+import { completeAIRewriteValues, extractAIRewriteValues, hasFilledAIRewriteValues } from './aiRewriteResult.js';
 import { buildPromptHistoryRows, buildPromptTemplateRows, createPromptWorkbookBlob } from './promptExcel.js';
-import { extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, moveItemById, normalizeImportedPromptRows, parseCsvRows, tableRowsToObjects } from './promptTemplate.js';
+import { countImportedPromptConflicts, extractTemplateFields, fillPromptTemplate, mergeImportedPromptRows, moveItemById, normalizeImportedPromptRows, parseCsvRows, shouldOpenPromptFillDialog, tableRowsToObjects } from './promptTemplate.js';
 import appIconUrl from '../../tools/prompt-manager-mac/Assets/PromptManager.svg';
 
 type Prompt = {
@@ -12,6 +15,8 @@ type Prompt = {
   title: string;
   description: string;
   prompt: string;
+  reusePrompt?: string;
+  customPrompt?: string;
   tags?: string[];
   outputMode?: 'copy' | 'insert' | 'ai';
   enabled?: boolean;
@@ -22,12 +27,15 @@ type Prompt = {
 };
 type Category = { id: string; label: string; icon: any; visible: boolean };
 type Layout = 'one' | 'two';
+type CallMode = 'reuse' | 'custom';
+type ImportDuplicateStrategy = 'append' | 'replace' | 'skip' | 'copy';
 type StoredCategory = { id: string; label: string; visible: boolean };
 type AIProviderConfig = { model: string; apiKey: string; baseUrl: string };
 type StoredState = {
   categories?: StoredCategory[];
   prompts?: Record<string, Prompt[]>;
   layout?: Layout;
+  launchAtLogin?: boolean;
   aiEnabled?: boolean;
   provider?: string;
   model?: string;
@@ -41,18 +49,36 @@ type ImportedPrompt = {
   title: string;
   description: string;
   prompt: string;
+  reusePrompt?: string;
+  customPrompt?: string;
   variables: string[];
 };
 type ChatCompletionPayload = {
   model: string;
   temperature: number;
+  max_tokens?: number;
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
+};
+type AIRequestConfig = {
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
 };
 type NativeAIResult = {
   requestId: string;
   ok: boolean;
   status?: number;
   body?: string;
+  message?: string;
+};
+type NativeLaunchAtLoginResult = {
+  requestId: string;
+  ok: boolean;
+  enabled?: boolean;
+  message?: string;
+};
+type NativeUsePromptResult = {
+  requestId: string;
+  ok: boolean;
   message?: string;
 };
 
@@ -64,11 +90,27 @@ const initialCategories: Category[] = [
 const initialPrompts: Record<string, Prompt[]> = {
   media: [
     { id: 1, title: "短视频选题", description: "根据主题生成简单的内容选题",
-      prompt: "请围绕主题「{{主题}}」生成 5 个适合自媒体发布的选题，每个选题用一句话说明亮点。" },
+      prompt: "请围绕主题 {{主题}} 生成 5 个适合自媒体发布的选题，每个选题用一句话说明亮点。",
+      customPrompt: "请围绕主题 {{主题}} 生成 5 个适合自媒体发布的选题，每个选题用一句话说明亮点。" },
+    { id: 3, title: "内容大纲", description: "承接选题生成文章结构，也可手动填写主题",
+      prompt: "请围绕 {{主题}} 生成一份公众号文章大纲，包含标题、开头、3 个小节和结尾。",
+      reusePrompt: "请读取上一轮生成的候选选题，选择最适合发布的一条，生成公众号文章大纲，包含标题、开头、3 个小节和结尾。",
+      customPrompt: "请围绕 {{主题}} 生成一份公众号文章大纲，包含标题、开头、3 个小节和结尾。" },
+    { id: 4, title: "发布包整理", description: "直接承接上一篇文章生成发布素材",
+      prompt: "请基于上一篇文章整理发布包，输出标题、封面文案、摘要、标签和评论引导。",
+      reusePrompt: "请基于上一篇文章整理发布包，输出标题、封面文案、摘要、标签和评论引导。" },
   ],
   knowledge: [
     { id: 2, title: "知识库整理", description: "把零散资料整理成知识库条目",
-      prompt: "请把以下资料整理成知识库条目，包含标题、摘要、关键结论和后续行动：\n\n资料：{{资料}}" },
+      prompt: "请把以下资料整理成知识库条目，包含标题、摘要、关键结论和后续行动：\n\n资料：{{资料}}",
+      customPrompt: "请把以下资料整理成知识库条目，包含标题、摘要、关键结论和后续行动：\n\n资料：{{资料}}" },
+    { id: 5, title: "资料清单", description: "直接承接上一步输出，整理可复用资料清单",
+      prompt: "请读取上一轮输出，整理成资料清单，包含来源、核心观点、适用场景和待补充问题。",
+      reusePrompt: "请读取上一轮输出，整理成资料清单，包含来源、核心观点、适用场景和待补充问题。" },
+    { id: 6, title: "访谈提纲", description: "可承接资料清单，也可手动输入访谈对象",
+      prompt: "请为 {{访谈对象}} 设计一份访谈提纲，围绕 {{访谈目标}} 列出 8 个问题。",
+      reusePrompt: "请基于上一轮资料清单生成访谈提纲，补齐资料里尚不明确的问题，输出 8 个问题。",
+      customPrompt: "请为 {{访谈对象}} 设计一份访谈提纲，围绕 {{访谈目标}} 列出 8 个问题。" },
   ],
 };
 
@@ -118,6 +160,7 @@ const restoreProviderConfigs = (stored: StoredState) => {
 };
 
 const STORAGE_KEY = 'prompt-management-tool:v1';
+const CALL_DEDUP_WINDOW_MS = 900;
 
 const categoryIconFor = (id: string) => {
   if (id === 'media') return Megaphone;
@@ -177,18 +220,6 @@ const findCategoryIdByLabel = (items: { id: string; label: string }[], label: st
   items.find(category => category.label.toLowerCase() === label.toLowerCase())?.id
 );
 
-const defaultAIBaseUrl = (provider: string) => {
-  if (provider === 'deepseek') return 'https://api.deepseek.com';
-  if (provider === 'openai') return 'https://api.openai.com/v1';
-  return '';
-};
-
-const chatCompletionEndpoint = (provider: string, baseUrl: string) => {
-  const root = (baseUrl.trim() || defaultAIBaseUrl(provider)).replace(/\/+$/, '');
-  if (!root) return '';
-  return root.endsWith('/chat/completions') ? root : `${root}/chat/completions`;
-};
-
 const modelForProvider = (provider: string, model: string) => {
   const trimmed = model.trim();
   const compact = trimmed.toLowerCase().replace(/\s+/g, '');
@@ -198,6 +229,85 @@ const modelForProvider = (provider: string, model: string) => {
 };
 
 const promptHistoryKey = (prompt: Prompt, categoryId: string) => `${categoryId}:${prompt.id}`;
+
+const CONTEXT_FIELD_NAMES = new Set([
+  '上一步文件名',
+  '上一步文件名称',
+  '上一步文件',
+  '上一步文档',
+  '上一步内容',
+  '上一步输出',
+  '上一步结果',
+  '上游文件名',
+  '上游文件名称',
+  '上游文档',
+  '上游内容',
+  '上游输出',
+  '前置文件名',
+  '前置文档',
+  '前置输出',
+]);
+
+const isContextTemplateField = (field: string) => {
+  const normalized = String(field || '').replace(/\s+/g, '');
+  if (CONTEXT_FIELD_NAMES.has(normalized)) return true;
+  return /^(上一步|上游|前置|前一步|前序|上个Skill|上一Skill)/.test(normalized)
+    && /(文件|文档|内容|输出|结果|名称|路径|资料)/.test(normalized);
+};
+
+const extractManualTemplateFields = (prompt: string) => (
+  extractTemplateFields(prompt).filter(field => !isContextTemplateField(field))
+);
+
+const templateFieldPlaceholder = (field: string) => {
+  const normalized = String(field || '').replace(/\s+/g, '');
+  if (normalized === '账号模式') return '个人号或医生号';
+  return `填写${field}`;
+};
+
+const fillManualTemplate = (prompt: string, values: Record<string, string>) => {
+  const safeValues = Object.fromEntries(
+    extractTemplateFields(prompt).map(field => [
+      field,
+      isContextTemplateField(field) ? `{{${field}}}` : values[field],
+    ]),
+  );
+  return fillPromptTemplate(prompt, { ...safeValues, ...values });
+};
+
+const getReusePromptText = (prompt: Prompt) => {
+  const explicit = prompt.reusePrompt?.trim();
+  if (explicit) return explicit;
+  if (prompt.customPrompt?.trim()) return '';
+  return extractManualTemplateFields(prompt.prompt).length > 0 ? '' : prompt.prompt;
+};
+
+const getCustomPromptText = (prompt: Prompt) => {
+  const explicit = prompt.customPrompt?.trim();
+  if (explicit) return explicit;
+  if (prompt.reusePrompt?.trim()) return '';
+  return extractManualTemplateFields(prompt.prompt).length > 0 ? prompt.prompt : '';
+};
+
+const getPromptSearchText = (prompt: Prompt, categoryLabel = '') => [
+  prompt.title,
+  prompt.description,
+  prompt.prompt,
+  prompt.reusePrompt,
+  prompt.customPrompt,
+  categoryLabel,
+].join(' ');
+
+const getPromptModeSummary = (prompt: Prompt) => {
+  const hasReuse = Boolean(getReusePromptText(prompt).trim());
+  const customPrompt = getCustomPromptText(prompt);
+  const customCount = extractManualTemplateFields(customPrompt).length;
+  const hasCustom = Boolean(customPrompt.trim());
+  if (hasReuse && hasCustom) return customCount > 0 ? `复用 / 定制 ${customCount} 项` : '复用 / 定制';
+  if (hasReuse) return '仅复用';
+  if (hasCustom) return customCount > 0 ? `仅定制 ${customCount} 项` : '仅定制';
+  return '未配置调用';
+};
 
 const parseJSONObject = (content: string) => {
   const trimmed = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -241,26 +351,62 @@ const formatAIErrorMessage = (error: unknown) => {
   return message.length > 80 ? `${message.slice(0, 77)}...` : message;
 };
 
+const createAbortError = () => {
+  const error = new Error('AI 请求已取消');
+  error.name = 'AbortError';
+  return error;
+};
+
+const isAbortError = (error: unknown) => (
+  error instanceof Error && error.name === 'AbortError'
+);
+
 const requestNativeChatCompletion = (
   endpoint: string,
-  apiKey: string,
-  body: ChatCompletionPayload,
+  requestConfig: AIRequestConfig,
+  signal?: AbortSignal,
 ) => new Promise<unknown>((resolve, reject) => {
   const handler = (window as any).webkit?.messageHandlers?.aiChatCompletion;
   if (!handler) {
     reject(new Error('当前环境不支持原生 AI 请求'));
     return;
   }
+  if (signal?.aborted) {
+    reject(createAbortError());
+    return;
+  }
 
   const requestId = `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let settled = false;
+  let timeoutId: number | undefined;
+  const cancelNativeRequest = () => {
+    const cancelHandler = (window as any).webkit?.messageHandlers?.cancelAIChatCompletion;
+    try {
+      if (cancelHandler) {
+        cancelHandler.postMessage({ requestId });
+      }
+    } catch (error) {
+      console.warn('cancel AI request failed', error);
+    }
+  };
+  const onAbort = () => {
+    if (settled) return;
+    settled = true;
+    cancelNativeRequest();
+    cleanup();
+    reject(createAbortError());
+  };
   const cleanup = () => {
-    window.clearTimeout(timeoutId);
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     window.removeEventListener('prompt-manager-ai-result', onResult);
+    signal?.removeEventListener('abort', onAbort);
   };
   const onResult = (event: Event) => {
     const detail = (event as CustomEvent<NativeAIResult>).detail;
     if (!detail || detail.requestId !== requestId) return;
 
+    if (settled) return;
+    settled = true;
     cleanup();
     if (!detail.ok) {
       reject(new Error(detail.body ? formatHTTPError(detail.status, detail.body) : (detail.message || 'AI 请求失败')));
@@ -272,50 +418,138 @@ const requestNativeChatCompletion = (
       reject(error);
     }
   };
-  const timeoutId = window.setTimeout(() => {
+  timeoutId = window.setTimeout(() => {
+    if (settled) return;
+    settled = true;
     cleanup();
     reject(new Error('AI 请求超时'));
   }, 60000);
 
   window.addEventListener('prompt-manager-ai-result', onResult);
+  signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    handler.postMessage({ requestId, endpoint, apiKey: apiKey.trim(), body });
+    handler.postMessage({ requestId, endpoint, headers: requestConfig.headers, body: requestConfig.body });
   } catch (error) {
+    if (settled) return;
+    settled = true;
     cleanup();
     reject(error);
   }
 });
 
 const requestChatCompletion = async (
+  provider: string,
   endpoint: string,
   apiKey: string,
+  baseUrl: string,
   body: ChatCompletionPayload,
+  signal?: AbortSignal,
 ) => {
+  const requestConfig = buildAIRequestConfig({ provider, apiKey, baseUrl, body }) as AIRequestConfig;
   if ((window as any).webkit?.messageHandlers?.aiChatCompletion) {
-    return requestNativeChatCompletion(endpoint, apiKey, body);
+    return requestNativeChatCompletion(endpoint, requestConfig, signal);
   }
 
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey.trim()}`,
-    },
-    body: JSON.stringify(body),
+    headers: requestConfig.headers,
+    body: JSON.stringify(requestConfig.body),
+    signal,
   });
   const text = await response.text();
   if (!response.ok) throw new Error(formatHTTPError(response.status, text));
   return parseAIResponseJSON(text, response.status);
 };
 
+const requestNativeLaunchAtLogin = (enabled: boolean) => new Promise<boolean>((resolve, reject) => {
+  const handler = (window as any).webkit?.messageHandlers?.launchAtLogin;
+  if (!handler) {
+    resolve(enabled);
+    return;
+  }
+
+  const requestId = `launch-at-login-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const cleanup = () => {
+    window.clearTimeout(timeoutId);
+    window.removeEventListener('prompt-manager-launch-at-login-result', onResult);
+  };
+  const onResult = (event: Event) => {
+    const detail = (event as CustomEvent<NativeLaunchAtLoginResult>).detail;
+    if (!detail || detail.requestId !== requestId) return;
+
+    cleanup();
+    if (!detail.ok) {
+      reject(new Error(detail.message || '开机启动设置失败'));
+      return;
+    }
+    resolve(Boolean(detail.enabled));
+  };
+  const timeoutId = window.setTimeout(() => {
+    cleanup();
+    reject(new Error('开机启动设置超时'));
+  }, 10000);
+
+  window.addEventListener('prompt-manager-launch-at-login-result', onResult);
+  try {
+    handler.postMessage({ requestId, enabled });
+  } catch (error) {
+    cleanup();
+    reject(error);
+  }
+});
+
+const requestNativeUsePrompt = (payload: Record<string, unknown>) => new Promise<boolean>((resolve, reject) => {
+  const handler = (window as any).webkit?.messageHandlers?.usePrompt;
+  if (!handler) {
+    reject(new Error('当前环境不支持原生调用'));
+    return;
+  }
+
+  const requestId = `use-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const cleanup = () => {
+    window.clearTimeout(timeoutId);
+    window.removeEventListener('prompt-manager-use-prompt-result', onResult);
+  };
+  const onResult = (event: Event) => {
+    const detail = (event as CustomEvent<NativeUsePromptResult>).detail;
+    if (!detail || detail.requestId !== requestId) return;
+
+    cleanup();
+    if (!detail.ok) {
+      reject(new Error(detail.message || '调用失败'));
+      return;
+    }
+    resolve(true);
+  };
+  const timeoutId = window.setTimeout(() => {
+    cleanup();
+    reject(new Error('调用超时'));
+  }, 8000);
+
+  window.addEventListener('prompt-manager-use-prompt-result', onResult);
+  try {
+    handler.postMessage({ ...payload, requestId });
+  } catch (error) {
+    cleanup();
+    reject(error);
+  }
+});
+
 export default function App() {
   const storedState = readStoredState();
-  const [categories, setCategories] = useState<Category[]>(() => restoreCategories(storedState.categories));
-  const [prompts, setPrompts] = useState<Record<string, Prompt[]>>(() => normalizePrompts(storedState.prompts));
+  const isCallModesDemo = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).get('demo') === 'call-modes';
+  const [categories, setCategories] = useState<Category[]>(() => (
+    isCallModesDemo ? initialCategories : restoreCategories(storedState.categories)
+  ));
+  const [prompts, setPrompts] = useState<Record<string, Prompt[]>>(() => (
+    isCallModesDemo ? initialPrompts : normalizePrompts(storedState.prompts)
+  ));
   const [activeTab, setActiveTab] = useState<string>('media');
   const [searchQuery, setSearchQuery] = useState('');
   const [layout, setLayout] = useState<Layout>(storedState.layout === 'one' ? 'one' : 'two');
   const [calledId, setCalledId] = useState<number | null>(null);
+  const [calledAction, setCalledAction] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [draggingCategoryId, setDraggingCategoryId] = useState<string | null>(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState<string | null>(null);
@@ -326,6 +560,7 @@ export default function App() {
   const [promptDragActive, setPromptDragActive] = useState(false);
   const [promptDragOffset, setPromptDragOffset] = useState({ x: 0, y: 0 });
   const tabListRef = useRef<HTMLDivElement | null>(null);
+  const lastCallActionRef = useRef<{ key: string; time: number } | null>(null);
   const draggingCategoryIdRef = useRef<string | null>(null);
   const draggingPromptIdRef = useRef<number | null>(null);
   const promptDragStartRef = useRef({ x: 0, y: 0 });
@@ -333,17 +568,25 @@ export default function App() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [importConflictOpen, setImportConflictOpen] = useState(false);
+  const [pendingImportRows, setPendingImportRows] = useState<ImportedPrompt[]>([]);
+  const [pendingImportDuplicateCount, setPendingImportDuplicateCount] = useState(0);
   const [addPromptOpen, setAddPromptOpen] = useState(false);
   const [callPromptOpen, setCallPromptOpen] = useState(false);
   const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
+  const [selectedPromptTemplate, setSelectedPromptTemplate] = useState('');
+  const [selectedCallMode, setSelectedCallMode] = useState<CallMode>('custom');
   const [selectedCategoryId, setSelectedCategoryId] = useState(activeTab);
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const [aiRewriteInput, setAiRewriteInput] = useState('');
   const [aiRewriting, setAiRewriting] = useState(false);
+  const aiRewriteAbortRef = useRef<AbortController | null>(null);
+  const aiRewriteRunRef = useRef(0);
   const [rewriteHistory, setRewriteHistory] = useState<Record<string, string>[]>([]);
   const [rewriteHistoryIndex, setRewriteHistoryIndex] = useState(-1);
   const [lastRewriteValues, setLastRewriteValues] = useState<Record<string, Record<string, string>>>(() => storedState.lastRewriteValues || {});
 
+  const [launchAtLogin, setLaunchAtLogin] = useState(Boolean(storedState.launchAtLogin));
   const [aiEnabled, setAiEnabled] = useState(Boolean(storedState.aiEnabled));
   const [provider, setProvider] = useState(storedState.providerConfigs ? (storedState.provider || 'openai') : inferLegacyProvider(storedState));
   const [providerConfigs, setProviderConfigs] = useState<Record<string, AIProviderConfig>>(() => restoreProviderConfigs(storedState));
@@ -353,12 +596,44 @@ export default function App() {
   // add prompt form
   const [formTitle, setFormTitle] = useState('');
   const [formDesc, setFormDesc] = useState('');
-  const [formPrompt, setFormPrompt] = useState('');
+  const [formReusePrompt, setFormReusePrompt] = useState('');
+  const [formCustomPrompt, setFormCustomPrompt] = useState('');
   const [formCategory, setFormCategory] = useState(activeTab);
   const currentProviderConfig = providerConfigs[provider] || createDefaultProviderConfigs()[provider] || { model: '', apiKey: '', baseUrl: '' };
   const configuredProviders = PROVIDERS.filter(item => providerConfigs[item.id]?.apiKey.trim());
   const activeCallProvider = callProvider || configuredProviders[0]?.id || provider;
   const activeCallConfig = providerConfigs[activeCallProvider] || currentProviderConfig;
+
+  const toggleReusePromptDraft = () => {
+    if (formReusePrompt.trim()) {
+      setFormReusePrompt('');
+      return;
+    }
+    const title = formTitle.trim() || '当前任务';
+    setFormReusePrompt(`请读取上一轮输出，围绕「${title}」继续处理，输出可直接使用的结果。`);
+  };
+
+  const toggleCustomPromptDraft = () => {
+    if (formCustomPrompt.trim()) {
+      setFormCustomPrompt('');
+      return;
+    }
+    const title = formTitle.trim() || '当前任务';
+    setFormCustomPrompt(`请围绕 {{主题}} 完成「${title}」，输出可直接使用的结果。`);
+  };
+
+  const updateLaunchAtLogin = async (enabled: boolean) => {
+    const previous = launchAtLogin;
+    setLaunchAtLogin(enabled);
+    try {
+      const syncedEnabled = await requestNativeLaunchAtLogin(enabled);
+      setLaunchAtLogin(syncedEnabled);
+      showToast(syncedEnabled ? '已开启开机启动' : '已关闭开机启动');
+    } catch (error) {
+      setLaunchAtLogin(previous);
+      showToast(formatAIErrorMessage(error));
+    }
+  };
 
   useEffect(() => {
     const cur = categories.find(c => c.id === activeTab && c.visible);
@@ -369,17 +644,19 @@ export default function App() {
   }, [categories, activeTab]);
 
   useEffect(() => {
+    if (isCallModesDemo) return;
     const state: StoredState = {
       categories: categories.map(({ id, label, visible }) => ({ id, label, visible })),
       prompts,
       layout,
+      launchAtLogin,
       aiEnabled,
       provider,
       providerConfigs,
       lastRewriteValues,
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [categories, prompts, layout, aiEnabled, provider, providerConfigs, lastRewriteValues]);
+  }, [categories, prompts, layout, launchAtLogin, aiEnabled, provider, providerConfigs, lastRewriteValues, isCallModesDemo]);
 
   useEffect(() => {
     if (!configuredProviders.length) {
@@ -443,6 +720,26 @@ export default function App() {
     setTimeout(() => setToast(null), 2000);
   };
 
+  const cancelAIRewrite = () => {
+    if (!aiRewriteAbortRef.current) {
+      setAiRewriting(false);
+      return;
+    }
+
+    aiRewriteRunRef.current += 1;
+    aiRewriteAbortRef.current?.abort();
+    aiRewriteAbortRef.current = null;
+    setAiRewriting(false);
+    showToast('已取消 AI 改写');
+  };
+
+  const updateCallPromptOpen = (open: boolean) => {
+    if (!open && aiRewriting) {
+      cancelAIRewrite();
+    }
+    setCallPromptOpen(open);
+  };
+
   const undoLastCall = () => {
     if (rewriteHistory.length > 0 && rewriteHistoryIndex > 0) {
       const nextIndex = rewriteHistoryIndex - 1;
@@ -464,58 +761,108 @@ export default function App() {
     showToast('已恢复上一次 AI 改写');
   };
 
-  const finishCall = async (prompt: string, id: number, categoryId = activeTab) => {
-    setCalledId(id);
-    setTimeout(() => setCalledId(null), 1200);
-    setPrompts(prev => ({
-      ...prev,
-      [categoryId]: (prev[categoryId] || []).map(item =>
-        item.id === id ? { ...item, usageCount: (item.usageCount || 0) + 1, updatedAt: Date.now() } : item
-      ),
-    }));
+  const finishCall = async (prompt: string, id: number, categoryId = activeTab, mode: CallMode = 'reuse') => {
+    const actionKey = `${categoryId}:${id}:${mode}`;
+    const now = Date.now();
+    if (lastCallActionRef.current && lastCallActionRef.current.key === actionKey && now - lastCallActionRef.current.time < CALL_DEDUP_WINDOW_MS) {
+      return false;
+    }
+    lastCallActionRef.current = { key: actionKey, time: now };
+    const markPromptFeedback = () => {
+      setCalledId(id);
+      setCalledAction(actionKey);
+      setTimeout(() => {
+        setCalledId(null);
+        setCalledAction(null);
+      }, 3000);
+    };
+    const markPromptUsed = () => {
+      const calledAt = Date.now();
+      setPrompts(prev => ({
+        ...prev,
+        [categoryId]: (prev[categoryId] || []).map(item =>
+          item.id === id ? { ...item, usageCount: (item.usageCount || 0) + 1, updatedAt: calledAt } : item
+        ),
+      }));
+    };
     const webkit = (window as any).webkit;
     const sourcePrompt = (prompts[categoryId] || []).find(item => item.id === id);
     if (webkit?.messageHandlers?.usePrompt) {
-      webkit.messageHandlers.usePrompt.postMessage({
-        id,
-        title: sourcePrompt?.title || 'Prompt',
-        description: sourcePrompt?.description || '',
-        prompt,
-        categoryId,
-        ai: aiEnabled ? {
-          provider: activeCallProvider,
-          model: activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '',
-          apiKey: activeCallConfig.apiKey,
-          baseUrl: activeCallConfig.baseUrl,
-        } : undefined,
-      });
-      showToast('Prompt 已调用');
-      return;
+      markPromptFeedback();
+      showToast('正在调用 Prompt');
+      try {
+        await requestNativeUsePrompt({
+          id,
+          title: sourcePrompt?.title || 'Prompt',
+          description: sourcePrompt?.description || '',
+          prompt,
+          categoryId,
+          callMode: mode,
+          ai: aiEnabled ? {
+            provider: activeCallProvider,
+            model: activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '',
+            apiKey: activeCallConfig.apiKey,
+            baseUrl: activeCallConfig.baseUrl,
+          } : undefined,
+        });
+        markPromptUsed();
+        showToast('Prompt 已调用');
+        return true;
+      } catch (error) {
+        showToast(formatAIErrorMessage(error));
+        return false;
+      }
     }
     try {
       await navigator.clipboard.writeText(prompt);
+      markPromptFeedback();
+      markPromptUsed();
       showToast('Prompt 已复制');
-    } catch { showToast('调用失败'); }
+      return true;
+    } catch {
+      showToast('调用失败');
+      return false;
+    }
+  };
+
+  const openTemplateCall = (prompt: Prompt, categoryId: string, template: string, mode: CallMode) => {
+    const fields = extractManualTemplateFields(template);
+    setSelectedPrompt(prompt);
+    setSelectedPromptTemplate(template);
+    setSelectedCallMode(mode);
+    setSelectedCategoryId(categoryId);
+    setTemplateValues(Object.fromEntries(fields.map(field => [field, ''])));
+    setAiRewriteInput('');
+    setRewriteHistory([]);
+    setRewriteHistoryIndex(-1);
+    setCallPromptOpen(true);
+  };
+
+  const handleModeCall = async (prompt: Prompt, mode: CallMode, categoryId = activeTab) => {
+    const template = mode === 'reuse' ? getReusePromptText(prompt) : getCustomPromptText(prompt);
+    if (!template.trim()) {
+      showToast(mode === 'reuse' ? '未配置复用 Prompt' : '未配置定制 Prompt');
+      return;
+    }
+    if (mode === 'reuse') {
+      await finishCall(template, prompt.id, categoryId, mode);
+      return;
+    }
+    if (shouldOpenPromptFillDialog({ mode, template })) {
+      openTemplateCall(prompt, categoryId, template, mode);
+      return;
+    }
+    await finishCall(template, prompt.id, categoryId, mode);
   };
 
   const handleCall = async (prompt: Prompt, categoryId = activeTab) => {
-    const fields = extractTemplateFields(prompt.prompt);
-    if (fields.length > 0) {
-      setSelectedPrompt(prompt);
-      setSelectedCategoryId(categoryId);
-      setTemplateValues(Object.fromEntries(fields.map(field => [field, ''])));
-      setAiRewriteInput('');
-      setRewriteHistory([]);
-      setRewriteHistoryIndex(-1);
-      setCallPromptOpen(true);
-      return;
-    }
-    await finishCall(prompt.prompt, prompt.id, categoryId);
+    await handleModeCall(prompt, getReusePromptText(prompt).trim() ? 'reuse' : 'custom', categoryId);
   };
 
   const rewriteTemplateWithAI = async () => {
     if (!selectedPrompt) return;
-    const fields = extractTemplateFields(selectedPrompt.prompt);
+    const template = selectedPromptTemplate || selectedPrompt.prompt;
+    const fields = extractManualTemplateFields(template);
     const brief = aiRewriteInput.trim();
     if (!brief) {
       showToast('请先输入要改写的关键词或句子');
@@ -525,77 +872,128 @@ export default function App() {
       showToast('请先在设置里配置 API Key');
       return;
     }
-    const endpoint = chatCompletionEndpoint(activeCallProvider, activeCallConfig.baseUrl);
+    const rawModel = activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '';
+    const requestProvider = resolveAIRequestProvider({
+      provider: activeCallProvider,
+      model: rawModel,
+      baseUrl: activeCallConfig.baseUrl,
+    });
+    const endpoint = aiCompletionEndpoint(requestProvider, activeCallConfig.baseUrl);
     if (!endpoint) {
-      showToast('请先配置兼容 /chat/completions 的 Base URL');
+      showToast('请先配置 AI Base URL');
       return;
     }
 
+    aiRewriteAbortRef.current?.abort();
+    const rewriteAbortController = new AbortController();
+    aiRewriteAbortRef.current = rewriteAbortController;
+    aiRewriteRunRef.current += 1;
+    const rewriteRunId = aiRewriteRunRef.current;
     setAiRewriting(true);
     try {
-      const rawModel = activeCallConfig.model || PROVIDERS.find(item => item.id === activeCallProvider)?.placeholder || '';
-      const data = await requestChatCompletion(endpoint, activeCallConfig.apiKey, {
-        model: modelForProvider(activeCallProvider, rawModel),
-        temperature: 0.4,
-        messages: [
-          {
-            role: 'system',
-            content: [
-              '你是 Prompt 优化大师，擅长把用户的关键词或短句改写成可直接填入 Prompt 模板字段的内容。',
-              '你要基于原始输入材料、Prompt 名称、完整模板和字段名，判断每个字段真正需要的信息。',
-              '输出要简洁、直白、具体，避免空话、套话和过度包装。',
-              '字段值只能写最终要填入模板的内容，不要在字段值里添加“用户输入：”“选题来源：”“主题：”等说明性前缀。',
-              '不要复述字段名，不要解释生成过程，不要 Markdown。',
-              '只输出 JSON 对象。',
-            ].join('\n'),
-          },
-          {
-            role: 'user',
-            content: [
-              `Prompt 名称：${selectedPrompt.title}`,
-              `需要填写的字段：${fields.join('、')}`,
-              `完整模板：\n${selectedPrompt.prompt}`,
-              `原始输入材料：\n${brief}`,
-              '请返回一个 JSON 对象，key 必须使用上面的字段名，value 是适合填入该字段的中文内容。每个字段都要返回。',
-              'value 里不要出现“用户输入：”“原始输入材料：”“字段名：”这类标签，只写内容本身。',
-            ].join('\n\n'),
-          },
-        ],
-      });
-      const content = data?.choices?.[0]?.message?.content;
+      const data = await requestChatCompletion(requestProvider, endpoint, activeCallConfig.apiKey, activeCallConfig.baseUrl, buildAIRewritePayload({
+        model: modelForProvider(requestProvider, rawModel),
+        title: selectedPrompt.title,
+        template,
+        fields,
+        brief,
+      }), rewriteAbortController.signal);
+      if (rewriteAbortController.signal.aborted || aiRewriteRunRef.current !== rewriteRunId) return;
+      const content = parseAICompletionText(requestProvider, data);
       if (!content) throw new Error('empty response');
-      const parsed = parseJSONObject(String(content));
-      const nextValues = Object.fromEntries(fields.map(field => [field, String(parsed[field] || '').trim()]));
+      const extractedValues = extractAIRewriteValues(String(content), fields);
+      const nextValues = completeAIRewriteValues({
+        values: extractedValues,
+        fields,
+        brief,
+        title: selectedPrompt.title,
+        template,
+      });
+      if (rewriteAbortController.signal.aborted || aiRewriteRunRef.current !== rewriteRunId) return;
+      if (!hasFilledAIRewriteValues(nextValues)) {
+        throw new Error('AI 返回内容没有匹配到任何字段');
+      }
+      const filledValues = Object.fromEntries(
+        Object.entries(nextValues).filter(([, value]) => String(value || '').trim()),
+      );
       const baseHistory = rewriteHistoryIndex >= 0 ? rewriteHistory.slice(0, rewriteHistoryIndex + 1) : [];
-      const nextHistory = [...baseHistory, nextValues];
+      const nextHistory = [...baseHistory, filledValues];
       setRewriteHistory(nextHistory);
       setRewriteHistoryIndex(nextHistory.length - 1);
-      setLastRewriteValues(prev => ({ ...prev, [promptHistoryKey(selectedPrompt, selectedCategoryId)]: nextValues }));
-      setTemplateValues(prev => ({ ...prev, ...nextValues }));
-      showToast('AI 已改写并填入');
+      setLastRewriteValues(prev => ({ ...prev, [promptHistoryKey(selectedPrompt, selectedCategoryId)]: filledValues }));
+      setTemplateValues(prev => ({ ...prev, ...filledValues }));
+      showToast(Object.keys(filledValues).length === fields.length ? 'AI 已改写并填入' : `AI 已填入 ${Object.keys(filledValues).length}/${fields.length} 项`);
     } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
+      if (aiRewriteRunRef.current !== rewriteRunId) return;
       console.error(error);
       showToast(`AI 改写失败：${formatAIErrorMessage(error)}`);
     } finally {
-      setAiRewriting(false);
+      if (aiRewriteAbortRef.current === rewriteAbortController) {
+        aiRewriteAbortRef.current = null;
+        setAiRewriting(false);
+      }
     }
   };
 
   const submitTemplateCall = async () => {
     if (!selectedPrompt) return;
-    const fields = extractTemplateFields(selectedPrompt.prompt);
+    const template = selectedPromptTemplate || selectedPrompt.prompt;
+    const fields = extractManualTemplateFields(template);
     const missingField = fields.find(field => !templateValues[field]?.trim());
     if (missingField) {
       showToast(`请填写：${missingField}`);
       return;
     }
-    await finishCall(fillPromptTemplate(selectedPrompt.prompt, templateValues), selectedPrompt.id, selectedCategoryId);
+    const called = await finishCall(fillManualTemplate(template, templateValues), selectedPrompt.id, selectedCategoryId, selectedCallMode);
+    if (!called) return;
     setCallPromptOpen(false);
     setSelectedPrompt(null);
+    setSelectedPromptTemplate('');
+    setSelectedCallMode('custom');
     setSelectedCategoryId(activeTab);
     setTemplateValues({});
     setRewriteHistory([]);
     setRewriteHistoryIndex(-1);
+  };
+
+  const applyImportedRows = (importedRows: ImportedPrompt[], duplicateStrategy: ImportDuplicateStrategy = 'append', duplicateCount = 0) => {
+    const next = mergeImportedPromptRows({ categories, prompts, rows: importedRows, duplicateStrategy });
+    setCategories(categoriesWithIcons(next.categories as Category[]));
+    setPrompts(next.prompts as Record<string, Prompt[]>);
+    setActiveTab(findCategoryIdByLabel(next.categories, importedRows[0]?.category) || activeTab);
+    if (duplicateStrategy === 'replace') {
+      showToast(`已导入 ${importedRows.length} 条，其中覆盖 ${duplicateCount} 条重复`);
+    } else if (duplicateStrategy === 'skip') {
+      showToast(`已新增 ${Math.max(importedRows.length - duplicateCount, 0)} 条，跳过 ${duplicateCount} 条重复`);
+    } else if (duplicateStrategy === 'copy') {
+      showToast(`已新增 ${importedRows.length} 条，重复项已另存为副本`);
+    } else {
+      showToast(`已新增 ${importedRows.length} 条 Prompt`);
+    }
+  };
+
+  const queueImportedRows = (importedRows: ImportedPrompt[]) => {
+    const duplicateCount = countImportedPromptConflicts({ categories, prompts, rows: importedRows });
+    if (duplicateCount > 0) {
+      setPendingImportRows(importedRows);
+      setPendingImportDuplicateCount(duplicateCount);
+      setImportConflictOpen(true);
+      return;
+    }
+    applyImportedRows(importedRows);
+  };
+
+  const resolveImportConflicts = (duplicateStrategy: ImportDuplicateStrategy) => {
+    const rows = pendingImportRows;
+    const duplicateCount = pendingImportDuplicateCount;
+    setImportConflictOpen(false);
+    setPendingImportRows([]);
+    setPendingImportDuplicateCount(0);
+    if (!rows.length) return;
+    applyImportedRows(rows, duplicateStrategy, duplicateCount);
   };
 
   const importPromptFile = async (file: File) => {
@@ -609,11 +1007,7 @@ export default function App() {
             showToast('导入失败：未找到有效的 Prompt 行');
             return;
           }
-          const next = mergeImportedPromptRows({ categories, prompts, rows: importedRows });
-          setCategories(categoriesWithIcons(next.categories as Category[]));
-          setPrompts(next.prompts as Record<string, Prompt[]>);
-          setActiveTab(findCategoryIdByLabel(next.categories, importedRows[0].category) || activeTab);
-          showToast(`已新增 ${importedRows.length} 条 Prompt`);
+          queueImportedRows(importedRows);
           return;
         }
         const nextCategories = restoreCategories(parsed.categories);
@@ -626,14 +1020,10 @@ export default function App() {
       } else {
         const importedRows = normalizeImportedPromptRows(await parseImportedTable(file)) as ImportedPrompt[];
         if (!importedRows.length) {
-          showToast('导入失败：表格需包含 category/title/prompt 列');
+          showToast('导入失败：表格需包含分类、标题，以及复用Prompt或定制Prompt');
           return;
         }
-        const next = mergeImportedPromptRows({ categories, prompts, rows: importedRows });
-        setCategories(categoriesWithIcons(next.categories as Category[]));
-        setPrompts(next.prompts as Record<string, Prompt[]>);
-        setActiveTab(findCategoryIdByLabel(next.categories, importedRows[0].category) || activeTab);
-        showToast(`已新增 ${importedRows.length} 条 Prompt`);
+        queueImportedRows(importedRows);
       }
     } catch {
       showToast('导入失败，请检查文件格式和表头');
@@ -722,7 +1112,11 @@ export default function App() {
   };
 
   const openAddPrompt = () => {
-    setFormTitle(''); setFormDesc(''); setFormPrompt(''); setFormCategory(activeTab);
+    setFormTitle('');
+    setFormDesc('');
+    setFormReusePrompt('');
+    setFormCustomPrompt('');
+    setFormCategory(activeTab);
     setEditingPromptId(null);
     setAddPromptOpen(true);
   };
@@ -730,20 +1124,28 @@ export default function App() {
   const openEditPrompt = (prompt: Prompt) => {
     setFormTitle(prompt.title);
     setFormDesc(prompt.description);
-    setFormPrompt(prompt.prompt);
+    setFormReusePrompt(getReusePromptText(prompt));
+    setFormCustomPrompt(getCustomPromptText(prompt));
     setFormCategory(activeTab);
     setEditingPromptId(prompt.id);
     setAddPromptOpen(true);
   };
 
   const submitPromptForm = () => {
-    if (!formTitle.trim() || !formPrompt.trim()) {
-      showToast('请填写标题和 Prompt 内容');
+    const reusePrompt = formReusePrompt.trim();
+    const customPrompt = formCustomPrompt.trim();
+    if (!formTitle.trim() || (!reusePrompt && !customPrompt)) {
+      showToast('请填写标题和至少一种 Prompt');
       return;
     }
+    const fallbackPrompt = customPrompt || reusePrompt;
     if (editingPromptId) {
       setPrompts(prev => {
         const next = { ...prev };
+        const sourceCategoryId = Object.keys(next).find(categoryId =>
+          (next[categoryId] || []).some(prompt => prompt.id === editingPromptId)
+        );
+        const sourceIndex = sourceCategoryId ? (next[sourceCategoryId] || []).findIndex(prompt => prompt.id === editingPromptId) : -1;
         const existing = Object.values(next).flat().find(prompt => prompt.id === editingPromptId);
         Object.keys(next).forEach(categoryId => {
           next[categoryId] = next[categoryId].filter(prompt => prompt.id !== editingPromptId);
@@ -753,17 +1155,31 @@ export default function App() {
           id: editingPromptId,
           title: formTitle.trim(),
           description: formDesc.trim() || '自定义 Prompt',
-          prompt: formPrompt.trim(),
+          prompt: fallbackPrompt,
+          reusePrompt: reusePrompt || undefined,
+          customPrompt: customPrompt || undefined,
           updatedAt: Date.now(),
         };
-        next[formCategory] = [...(next[formCategory] || []), updated];
+        if (sourceCategoryId === formCategory && sourceIndex >= 0) {
+          const targetList = [...(next[formCategory] || [])];
+          targetList.splice(sourceIndex, 0, updated);
+          next[formCategory] = targetList;
+        } else {
+          next[formCategory] = [...(next[formCategory] || []), updated];
+        }
         return next;
       });
       showToast('已保存 Prompt');
     } else {
       const now = Date.now();
       const newP: Prompt = { id: now, title: formTitle.trim(),
-        description: formDesc.trim() || '自定义 Prompt', prompt: formPrompt.trim(), usageCount: 0, createdAt: now, updatedAt: now };
+        description: formDesc.trim() || '自定义 Prompt',
+        prompt: fallbackPrompt,
+        reusePrompt: reusePrompt || undefined,
+        customPrompt: customPrompt || undefined,
+        usageCount: 0,
+        createdAt: now,
+        updatedAt: now };
       setPrompts(prev => ({ ...prev, [formCategory]: [...(prev[formCategory] || []), newP] }));
       showToast('已添加新 Prompt');
     }
@@ -800,8 +1216,21 @@ export default function App() {
   };
   const deleteCategory = (id: string) => {
     if (categories.length <= 1) { showToast('至少保留一个分类'); return; }
+    const category = categories.find(c => c.id === id);
+    const promptCount = (prompts[id] || []).length;
+    const ok = window.confirm(
+      promptCount > 0
+        ? `删除分类“${category?.label || id}”会同时删除其中 ${promptCount} 个 Prompt，且无法恢复。确定继续吗？`
+        : `确定删除分类“${category?.label || id}”吗？该操作无法恢复。`
+    );
+    if (!ok) return;
     setCategories(prev => prev.filter(c => c.id !== id));
     setPrompts(prev => { const n = { ...prev }; delete n[id]; return n; });
+    if (activeTab === id) {
+      const nextCategory = categories.find(c => c.id !== id && c.visible) || categories.find(c => c.id !== id);
+      if (nextCategory) setActiveTab(nextCategory.id);
+    }
+    showToast('已删除分类');
   };
 
   const reorderCategories = (sourceId: string, targetId: string) => {
@@ -928,9 +1357,7 @@ export default function App() {
 
   const list = (prompts[activeTab] || []).filter(prompt => prompt.enabled !== false);
   const filteredPrompts = list.filter(p =>
-    p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    p.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    p.prompt.toLowerCase().includes(searchQuery.toLowerCase())
+    getPromptSearchText(p).toLowerCase().includes(searchQuery.toLowerCase())
   );
   const visibleCats = categories.filter(c => c.visible);
   const displayCats = tabsOverflowing && !tabsExpanded ? visibleCats.slice(0, 4) : visibleCats;
@@ -946,8 +1373,7 @@ export default function App() {
   ).filter(({ prompt, category }) => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return true;
-    return [prompt.title, prompt.description, prompt.prompt, category.label]
-      .join(' ')
+    return getPromptSearchText(prompt, category.label)
       .toLowerCase()
       .includes(query);
   });
@@ -956,8 +1382,12 @@ export default function App() {
     await handleCall(prompt, categoryId);
   };
 
+  const activeTemplate = selectedPromptTemplate || selectedPrompt?.prompt || '';
+  const activeManualFields = extractManualTemplateFields(activeTemplate);
+  const activeTemplatePreview = fillManualTemplate(activeTemplate, templateValues);
+
   const launcherFillTemplateDialog = (
-    <Dialog.Root open={callPromptOpen} onOpenChange={setCallPromptOpen}>
+    <Dialog.Root open={callPromptOpen} onOpenChange={updateCallPromptOpen}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50"
           style={{ background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(4px)' }} />
@@ -967,7 +1397,7 @@ export default function App() {
             boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
           <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b" style={{ borderColor: '#f1f5f9' }}>
             <Dialog.Title style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>
-              {selectedPrompt?.title || '填写 Prompt'}
+              {selectedPrompt ? `${selectedCallMode === 'reuse' ? '复用' : '定制'}：${selectedPrompt.title}` : '填写 Prompt'}
             </Dialog.Title>
             <Dialog.Close className="grid place-items-center rounded-full hover:bg-slate-100"
               style={{ width: 32, height: 32, color: '#64748b' }}>
@@ -975,13 +1405,13 @@ export default function App() {
             </Dialog.Close>
           </div>
           <div className="px-6 py-5 space-y-4 max-h-[70vh] overflow-y-auto">
-            {selectedPrompt && extractTemplateFields(selectedPrompt.prompt).map(field => (
+            {activeManualFields.map(field => (
               <div key={field}>
                 <label style={{ fontSize: 11, color: '#64748b' }}>{field}</label>
                 <textarea
                   value={templateValues[field] || ''}
                   onChange={(e) => setTemplateValues(prev => ({ ...prev, [field]: e.target.value }))}
-                  placeholder={`填写${field}`}
+                  placeholder={templateFieldPlaceholder(field)}
                   rows={field.includes('内容') || field.includes('代码') || field.includes('原文') ? 5 : 2}
                   className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a] resize-none"
                   style={{ fontSize: 13, borderColor: '#e2e8f0', lineHeight: 1.6 }}
@@ -993,7 +1423,7 @@ export default function App() {
                 <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>生成预览</div>
                 <pre className="whitespace-pre-wrap break-words max-h-36 overflow-auto"
                   style={{ fontSize: 12, color: '#334155', lineHeight: 1.55, fontFamily: 'ui-monospace, monospace' }}>
-                  {selectedPrompt ? fillPromptTemplate(selectedPrompt.prompt, templateValues) : ''}
+                  {activeTemplatePreview}
                 </pre>
               </div>
             )}
@@ -1263,7 +1693,13 @@ export default function App() {
               <div className={`grid gap-3 ${layout === 'two' ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 {filteredPrompts.map((prompt) => {
                   const called = calledId === prompt.id;
-                  const variableCount = extractTemplateFields(prompt.prompt).length;
+                  const reusePrompt = getReusePromptText(prompt);
+                  const customPrompt = getCustomPromptText(prompt);
+                  const canReuse = Boolean(reusePrompt.trim());
+                  const canCustom = Boolean(customPrompt.trim());
+                  const reuseCalled = calledAction === `${activeTab}:${prompt.id}:reuse`;
+                  const customCalled = calledAction === `${activeTab}:${prompt.id}:custom`;
+                  const customIsPrimary = canCustom && !canReuse;
                   const isDraggingPrompt = promptDragActive && draggingPromptId === prompt.id;
                   const isPromptDropTarget = promptDragActive && dragOverPromptId === prompt.id;
                   return (
@@ -1318,35 +1754,53 @@ export default function App() {
                             已使用 {prompt.usageCount} 次
                           </p>
                         )}
-                        {variableCount > 0 && (
-                          <p className="mt-1" style={{ fontSize: 11, color: '#3b63ff' }}>
-                            调用前填写 {variableCount} 项
-                          </p>
-                        )}
+                        <p className="mt-1" style={{ fontSize: 11, color: canReuse || canCustom ? '#3b63ff' : '#94a3b8' }}>
+                          {getPromptModeSummary(prompt)}
+                        </p>
                       </div>
-	                      <div className="shrink-0 flex flex-col items-center gap-2" data-no-prompt-drag>
-	                        <button onClick={() => handleCall(prompt)}
-	                          className="inline-flex items-center gap-1.5 rounded-full transition-all active:scale-95 hover:-translate-y-0.5"
-	                          style={{ padding: '8px 14px', fontSize: 12.5, fontWeight: 500, color: '#fff',
-	                            background: called
-	                              ? 'linear-gradient(135deg,#10b981,#059669)'
-	                              : 'linear-gradient(135deg,#3b63ff,#6366f1)',
-	                            boxShadow: called
-	                              ? '0 6px 18px rgba(16,185,129,0.35)'
-	                              : '0 4px 14px rgba(59,99,255,0.28)',
-	                            transform: called ? 'scale(1.04)' : undefined }}>
-	                          {called ? (<><Check className="w-3.5 h-3.5" />已调用</>) : (<><Send className="w-3.5 h-3.5" />调用</>)}
+	                      <div className="shrink-0 flex w-[74px] flex-col items-stretch gap-1.5" data-no-prompt-drag>
+	                        <button onClick={() => handleModeCall(prompt, 'reuse')}
+                            disabled={!canReuse}
+	                          className="inline-flex h-[30px] items-center justify-center gap-1 rounded-full transition-all enabled:active:scale-95 enabled:hover:-translate-y-0.5 disabled:cursor-not-allowed"
+	                          style={{ fontSize: 12, fontWeight: 700, color: canReuse ? '#fff' : '#94a3b8',
+	                            background: canReuse
+	                              ? reuseCalled
+                                  ? 'linear-gradient(135deg,#10b981,#059669)'
+                                  : 'linear-gradient(135deg,#3b63ff,#6366f1)'
+                                : '#eef2f7',
+	                            boxShadow: canReuse ? '0 4px 14px rgba(59,99,255,0.22)' : 'inset 0 0 0 1px #e2e8f0',
+	                            opacity: canReuse ? 1 : 0.72,
+	                            transform: reuseCalled ? 'scale(1.04)' : undefined }}
+                            title={canReuse ? '使用上一步输出直接调用' : '未配置复用 Prompt'}>
+	                          {reuseCalled ? <Check className="w-3.5 h-3.5" /> : null}复用
 	                        </button>
-	                        <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
+	                        <button onClick={() => handleModeCall(prompt, 'custom')}
+                            disabled={!canCustom}
+	                          className="inline-flex h-[30px] items-center justify-center gap-1 rounded-full border transition-all enabled:active:scale-95 enabled:hover:-translate-y-0.5 disabled:cursor-not-allowed"
+	                          style={{ fontSize: 12, fontWeight: 700,
+	                            color: canCustom ? (customIsPrimary || customCalled ? '#fff' : '#3b63ff') : '#94a3b8',
+	                            background: canCustom
+	                              ? customCalled
+                                  ? 'linear-gradient(135deg,#10b981,#059669)'
+                                  : customIsPrimary ? 'linear-gradient(135deg,#3b63ff,#6366f1)' : '#eef4ff'
+                                : '#f1f5f9',
+                              borderColor: canCustom ? '#c7d2fe' : '#e2e8f0',
+	                            boxShadow: customIsPrimary && !customCalled ? '0 4px 14px rgba(59,99,255,0.22)' : 'none',
+	                            opacity: canCustom ? 1 : 0.72,
+	                            transform: customCalled ? 'scale(1.04)' : undefined }}
+                            title={canCustom ? '填写内容后调用' : '未配置定制 Prompt'}>
+	                          {customCalled ? <Check className="w-3.5 h-3.5" /> : null}定制
+	                        </button>
+	                        <div className="flex items-center justify-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
 	                          <button onClick={() => openEditPrompt(prompt)}
 	                            className="grid place-items-center rounded-full hover:bg-slate-100"
-	                            style={{ width: 30, height: 30, color: '#64748b' }}
+	                            style={{ width: 30, height: 28, color: '#64748b' }}
 	                            title="编辑 Prompt">
 	                            <Pencil className="w-3.5 h-3.5" />
 	                          </button>
 	                          <button onClick={() => deletePrompt(prompt.id)}
 	                            className="grid place-items-center rounded-full hover:bg-red-50"
-	                            style={{ width: 30, height: 30, color: '#94a3b8' }}
+	                            style={{ width: 30, height: 28, color: '#94a3b8' }}
 	                            title="删除 Prompt">
 	                            <Trash2 className="w-3.5 h-3.5" />
 	                          </button>
@@ -1428,6 +1882,70 @@ export default function App() {
         </Dialog.Portal>
       </Dialog.Root>
 
+      {/* Import Conflict Dialog */}
+      <Dialog.Root
+        open={importConflictOpen}
+        onOpenChange={(open) => {
+          setImportConflictOpen(open);
+          if (!open) {
+            setPendingImportRows([]);
+            setPendingImportDuplicateCount(0);
+          }
+        }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50"
+            style={{ background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(4px)' }} />
+          <Dialog.Content
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[460px] max-w-[92vw] rounded-3xl border"
+            style={{ background: '#fff', borderColor: '#e2e8f0',
+              boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
+            <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b" style={{ borderColor: '#f1f5f9' }}>
+              <Dialog.Title style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>
+                发现同名 Prompt
+              </Dialog.Title>
+              <button
+                onClick={() => {
+                  setImportConflictOpen(false);
+                  setPendingImportRows([]);
+                  setPendingImportDuplicateCount(0);
+                }}
+                className="grid place-items-center rounded-full hover:bg-slate-100"
+                style={{ width: 32, height: 32, color: '#64748b' }}>
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="px-6 py-5">
+              <p style={{ fontSize: 13, lineHeight: 1.7, color: '#64748b', margin: 0 }}>
+                有 {pendingImportDuplicateCount} 条导入内容与当前库里的同分类同标题 Prompt 重复，请选择处理方式。
+              </p>
+              <div className="mt-5 grid gap-2">
+                <button
+                  onClick={() => resolveImportConflicts('replace')}
+                  className="w-full rounded-2xl border text-left transition-colors hover:bg-slate-50"
+                  style={{ padding: '13px 15px', borderColor: '#dbe7ff' }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#3b63ff' }}>覆盖已有</div>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>保留原位置和使用次数，用导入内容更新已有 Prompt。</div>
+                </button>
+                <button
+                  onClick={() => resolveImportConflicts('skip')}
+                  className="w-full rounded-2xl border text-left transition-colors hover:bg-slate-50"
+                  style={{ padding: '13px 15px', borderColor: '#e2e8f0' }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>跳过重复</div>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>重复项不导入，只新增没有冲突的 Prompt。</div>
+                </button>
+                <button
+                  onClick={() => resolveImportConflicts('copy')}
+                  className="w-full rounded-2xl border text-left transition-colors hover:bg-slate-50"
+                  style={{ padding: '13px 15px', borderColor: '#e2e8f0' }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>另存为副本</div>
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 4 }}>重复项会改名为“副本”后追加到原分类末尾。</div>
+                </button>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
       {/* Add Prompt Dialog */}
       <Dialog.Root open={addPromptOpen} onOpenChange={setAddPromptOpen}>
         <Dialog.Portal>
@@ -1476,15 +1994,52 @@ export default function App() {
                   className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a]"
                   style={{ fontSize: 13, borderColor: '#e2e8f0' }} />
               </div>
-              <div>
-                <label style={{ fontSize: 11, color: '#64748b' }}>Prompt 内容</label>
-                <textarea value={formPrompt} onChange={(e) => setFormPrompt(e.target.value)}
-                  placeholder="输入完整的 Prompt 内容..."
-                  rows={6}
-                  className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a] resize-none"
-                  style={{ fontSize: 13, borderColor: '#e2e8f0', fontFamily: 'ui-monospace, monospace', lineHeight: 1.6 }} />
+              <div className="rounded-2xl border p-3"
+                style={{ borderColor: formReusePrompt.trim() ? '#dbe7ff' : '#e2e8f0',
+                  background: formReusePrompt.trim() ? '#f8fbff' : '#fff' }}>
+	                <div className="flex items-center justify-between gap-3">
+	                  <label style={{ fontSize: 11, color: formReusePrompt.trim() ? '#3b63ff' : '#64748b', fontWeight: 700 }}>复用 Prompt</label>
+	                  <button type="button" onClick={toggleReusePromptDraft}
+                      className="rounded-full px-2 py-0.5 transition-colors"
+	                    style={{ fontSize: 10, fontWeight: 700, color: formReusePrompt.trim() ? '#3b63ff' : '#64748b',
+	                      background: formReusePrompt.trim() ? '#eef4ff' : '#f1f5f9',
+                        cursor: 'pointer' }}
+                      title={formReusePrompt.trim() ? '点击禁用复用 Prompt' : '点击启用复用 Prompt'}>
+	                    {formReusePrompt.trim() ? '禁用' : '启用'}
+	                  </button>
+                </div>
+                <textarea value={formReusePrompt} onChange={(e) => setFormReusePrompt(e.target.value)}
+                  placeholder="例如：基于上一轮输出继续生成下一份文档..."
+                  rows={5}
+                  className="w-full mt-2 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#3b63ff] resize-none"
+                  style={{ fontSize: 13, borderColor: formReusePrompt.trim() ? '#dbe7ff' : '#e2e8f0',
+                    background: '#fff', fontFamily: 'ui-monospace, monospace', lineHeight: 1.6 }} />
                 <div className="mt-1.5" style={{ fontSize: 11, color: '#94a3b8' }}>
-                  每次调用都要填写的内容，用 {'{{字段名}}'} 标记，例如 {'{{原文内容}}'}
+                  复用 Prompt 会直接调用，不需要填写占位符。
+                </div>
+              </div>
+              <div className="rounded-2xl border p-3"
+                style={{ borderColor: formCustomPrompt.trim() ? '#dbe7ff' : '#e2e8f0',
+                  background: formCustomPrompt.trim() ? '#f8fbff' : '#fff' }}>
+	                <div className="flex items-center justify-between gap-3">
+	                  <label style={{ fontSize: 11, color: formCustomPrompt.trim() ? '#3b63ff' : '#64748b', fontWeight: 700 }}>定制 Prompt</label>
+	                  <button type="button" onClick={toggleCustomPromptDraft}
+                      className="rounded-full px-2 py-0.5 transition-colors"
+	                    style={{ fontSize: 10, fontWeight: 700, color: formCustomPrompt.trim() ? '#3b63ff' : '#64748b',
+	                      background: formCustomPrompt.trim() ? '#eef4ff' : '#f1f5f9',
+                        cursor: 'pointer' }}
+                      title={formCustomPrompt.trim() ? '点击禁用定制 Prompt' : '点击启用定制 Prompt'}>
+	                    {formCustomPrompt.trim() ? '禁用' : '启用'}
+	                  </button>
+                </div>
+                <textarea value={formCustomPrompt} onChange={(e) => setFormCustomPrompt(e.target.value)}
+                  placeholder="例如：请围绕 {{主题}} 生成一份内容方案..."
+                  rows={5}
+                  className="w-full mt-2 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a] resize-none"
+                  style={{ fontSize: 13, borderColor: formCustomPrompt.trim() ? '#dbe7ff' : '#e2e8f0',
+                    fontFamily: 'ui-monospace, monospace', lineHeight: 1.6 }} />
+                <div className="mt-1.5" style={{ fontSize: 11, color: '#94a3b8' }}>
+                  需要手动填写的内容，用 {'{{字段名}}'} 标记，例如 {'{{原文内容}}'}。
                 </div>
               </div>
             </div>
@@ -1506,7 +2061,7 @@ export default function App() {
       </Dialog.Root>
 
       {/* Fill Template Dialog */}
-      <Dialog.Root open={callPromptOpen} onOpenChange={setCallPromptOpen}>
+      <Dialog.Root open={callPromptOpen} onOpenChange={updateCallPromptOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50"
             style={{ background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(4px)' }} />
@@ -1516,7 +2071,7 @@ export default function App() {
               boxShadow: '0 24px 60px rgba(15,23,42,0.18)' }}>
             <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b" style={{ borderColor: '#f1f5f9' }}>
               <Dialog.Title style={{ fontSize: 16, fontWeight: 600, color: '#0f172a' }}>
-                {selectedPrompt?.title || '填写 Prompt'}
+                {selectedPrompt ? `${selectedCallMode === 'reuse' ? '复用' : '定制'}：${selectedPrompt.title}` : '填写 Prompt'}
               </Dialog.Title>
               <Dialog.Close className="grid place-items-center rounded-full hover:bg-slate-100"
                 style={{ width: 32, height: 32, color: '#64748b' }}>
@@ -1524,7 +2079,7 @@ export default function App() {
               </Dialog.Close>
             </div>
             <div className="px-6 py-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
-              {selectedPrompt && (
+              {selectedPrompt && activeManualFields.length > 0 && (
                 <div className="rounded-2xl border px-3 py-3" style={{ borderColor: '#dbe7ff', background: '#f8fbff' }}>
                   <div className="flex items-center justify-between gap-3 mb-2">
                     <label style={{ fontSize: 11, color: '#3b63ff', fontWeight: 700 }}>AI改写</label>
@@ -1548,13 +2103,13 @@ export default function App() {
                   />
                 </div>
               )}
-              {selectedPrompt && extractTemplateFields(selectedPrompt.prompt).map(field => (
+              {activeManualFields.map(field => (
                 <div key={field}>
                   <label style={{ fontSize: 11, color: '#64748b' }}>{field}</label>
                   <textarea
                     value={templateValues[field] || ''}
                     onChange={(e) => setTemplateValues(prev => ({ ...prev, [field]: e.target.value }))}
-                    placeholder={`填写${field}`}
+                    placeholder={templateFieldPlaceholder(field)}
                     rows={field.includes('内容') || field.includes('代码') || field.includes('原文') ? 5 : 2}
                     className="w-full mt-1.5 rounded-lg border px-3 py-2 focus:outline-none focus:border-[#0f172a] resize-none"
                     style={{ fontSize: 13, borderColor: '#e2e8f0', lineHeight: 1.6 }}
@@ -1566,7 +2121,7 @@ export default function App() {
                   <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>生成预览</div>
                   <pre className="whitespace-pre-wrap break-words max-h-36 overflow-auto"
                     style={{ fontSize: 12, color: '#334155', lineHeight: 1.55, fontFamily: 'ui-monospace, monospace' }}>
-                    {fillPromptTemplate(selectedPrompt.prompt, templateValues)}
+                    {activeTemplatePreview}
                   </pre>
                 </div>
               )}
@@ -1666,10 +2221,10 @@ export default function App() {
                         <Switch.Root
                           checked={cat.visible}
                           onCheckedChange={(v) => updateCategory(cat.id, { visible: v })}
-                          className="relative rounded-full transition-colors shrink-0"
+                          className="relative inline-flex items-center rounded-full transition-colors shrink-0"
                           style={{ width: 36, height: 20, background: cat.visible ? '#0f172a' : '#cbd5e1' }}>
                           <Switch.Thumb className="block rounded-full bg-white transition-transform"
-                            style={{ width: 16, height: 16, transform: `translateX(${cat.visible ? 18 : 2}px) translateY(2px)`,
+                            style={{ width: 16, height: 16, transform: `translateX(${cat.visible ? 18 : 2}px)`,
                               boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
                         </Switch.Root>
                         <button onClick={() => deleteCategory(cat.id)}
@@ -1684,6 +2239,21 @@ export default function App() {
                 </div>
               </section>
 
+              {/* Launch at login */}
+              <section>
+                <div className="flex items-center justify-between rounded-xl border"
+                  style={{ borderColor: '#e2e8f0', minHeight: 40, padding: '0 12px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>开机启动</div>
+                  <Switch.Root checked={launchAtLogin} onCheckedChange={updateLaunchAtLogin}
+                    className="relative inline-flex items-center rounded-full transition-colors shrink-0"
+                    style={{ width: 36, height: 20, background: launchAtLogin ? '#0f172a' : '#cbd5e1' }}>
+                    <Switch.Thumb className="block rounded-full bg-white transition-transform"
+                      style={{ width: 16, height: 16, transform: `translateX(${launchAtLogin ? 18 : 2}px)`,
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
+                  </Switch.Root>
+                </div>
+              </section>
+
               {/* AI Integration */}
               <section>
                 <div className="flex items-center justify-between mb-3">
@@ -1694,10 +2264,10 @@ export default function App() {
                     </div>
                   </div>
                   <Switch.Root checked={aiEnabled} onCheckedChange={setAiEnabled}
-                    className="relative rounded-full transition-colors"
+                    className="relative inline-flex items-center rounded-full transition-colors shrink-0"
                     style={{ width: 36, height: 20, background: aiEnabled ? '#0f172a' : '#cbd5e1' }}>
                     <Switch.Thumb className="block rounded-full bg-white transition-transform"
-                      style={{ width: 16, height: 16, transform: `translateX(${aiEnabled ? 18 : 2}px) translateY(2px)`,
+                      style={{ width: 16, height: 16, transform: `translateX(${aiEnabled ? 18 : 2}px)`,
                         boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
                   </Switch.Root>
                 </div>

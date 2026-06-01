@@ -1,21 +1,40 @@
 import { strToU8, zipSync } from 'fflate';
+import { extractManualTemplateFields } from './promptTemplate.js';
 
-const HEADERS = ['分类', '标题', '简介', 'Prompt内容'];
+const HEADERS = ['分类', '标题', '简介', '复用Prompt', '定制Prompt'];
 const INSTRUCTION_ROW = [
   '填写所属分类，必填；不存在时导入会自动新建。',
   '填写 Prompt 名称，必填。',
   '一句话说明用途，可选。',
-  '填写完整 Prompt，可使用 {{字段名}} 作为调用前需要填写的占位符。',
+  '上下文充足时直接调用完整 Prompt，不使用占位符；仅定制可留空。',
+  '需要手动填写时使用，用 {{字段名}} 标记，例如 {{主题}}；仅复用可留空。',
 ];
-const EXAMPLE_ROW = [
-  '自媒体',
-  '公众号文章优化',
-  '根据主题、读者和原文生成优化建议',
-  '请优化以下公众号文章。\n\n文章主题：{{文章主题}}\n目标读者：{{目标读者}}\n原文内容：{{原文内容}}\n\n要求：\n1. 优化标题\n2. 调整段落结构\n3. 提炼金句\n4. 保持亲和、清晰的语气',
+const EXAMPLE_ROWS = [
+  [
+    '自媒体',
+    '发布包整理',
+    '直接承接上一篇文章生成发布素材',
+    '请基于上一篇文章整理发布包，输出标题、封面文案、摘要、标签和评论引导。',
+    '',
+  ],
+  [
+    '自媒体',
+    '内容大纲',
+    '可承接选题，也可手动填写主题',
+    '请读取上一轮生成的候选选题，选择最适合发布的一条，生成公众号文章大纲。',
+    '请围绕 {{主题}} 生成一份公众号文章大纲，包含标题、开头、3 个小节和结尾。',
+  ],
+  [
+    '自媒体',
+    '短视频选题',
+    '根据主题生成选题',
+    '',
+    '请围绕主题 {{主题}} 生成 5 个适合自媒体发布的选题，每个选题用一句话说明亮点。',
+  ],
 ];
 
 export function buildPromptTemplateRows() {
-  return [HEADERS, INSTRUCTION_ROW, EXAMPLE_ROW];
+  return [HEADERS, INSTRUCTION_ROW, ...EXAMPLE_ROWS];
 }
 
 export function buildPromptHistoryRows(categories = [], prompts = {}) {
@@ -57,13 +76,27 @@ export function createPromptWorkbookBlob(rows) {
 
 function appendPromptRows(rows, categoryLabel, promptList) {
   (Array.isArray(promptList) ? promptList : []).forEach((prompt) => {
+    const { reusePrompt, customPrompt } = promptModeColumns(prompt);
     rows.push([
       categoryLabel,
       prompt?.title || '',
       prompt?.description || '',
-      prompt?.prompt || '',
+      reusePrompt,
+      customPrompt,
     ]);
   });
+}
+
+function promptModeColumns(prompt) {
+  const reusePrompt = String(prompt?.reusePrompt || '').trim();
+  const customPrompt = String(prompt?.customPrompt || '').trim();
+  if (reusePrompt || customPrompt) return { reusePrompt, customPrompt };
+
+  const legacyPrompt = String(prompt?.prompt || '').trim();
+  if (!legacyPrompt) return { reusePrompt: '', customPrompt: '' };
+  return extractManualTemplateFields(legacyPrompt).length > 0
+    ? { reusePrompt: '', customPrompt: legacyPrompt }
+    : { reusePrompt: legacyPrompt, customPrompt: '' };
 }
 
 function xmlFile(xml) {
@@ -71,7 +104,7 @@ function xmlFile(xml) {
 }
 
 function worksheetXml(rows) {
-  const columnWidths = [14, 24, 34, 80];
+  const columnWidths = [14, 24, 34, 80, 80];
   const cols = columnWidths
     .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`)
     .join('');
@@ -93,7 +126,7 @@ function worksheetXml(rows) {
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <cols>${cols}</cols>
   <sheetData>${sheetData}</sheetData>
-  <autoFilter ref="A1:D${Math.max(rows.length, 1)}"/>
+  <autoFilter ref="A1:${columnName(columnWidths.length)}${Math.max(rows.length, 1)}"/>
   <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
   <selection pane="bottomLeft"/>
 </worksheet>`;

@@ -1,12 +1,32 @@
-const FIELD_PATTERN = /\{\{\s*([^{}\n]+?)\s*\}\}/g;
+const FIELD_PATTERN = /\{\s*\{\s*([^{}\n]+?)\s*\}\s*\}/g;
 const LEGACY_FIELD_PATTERN = /\[\s*([^\[\]\n]+?)\s*\](?!\()/g;
 
 const COLUMN_ALIASES = {
   category: ['category', '分类'],
   title: ['title', '标题', '名称', 'prompt名称', 'prompt_name'],
   description: ['description', '描述', '简介', '说明'],
+  reusePrompt: ['reusePrompt', 'reuse_prompt', '复用Prompt', '复用 prompt', '复用提示词', '复用'],
+  customPrompt: ['customPrompt', 'custom_prompt', '定制Prompt', '定制 prompt', '定制提示词', '自定义Prompt', '自定义提示词', '定制'],
   prompt: ['prompt', 'Prompt', 'prompt内容', 'Prompt内容', '正文', '内容'],
 };
+
+const CONTEXT_FIELD_NAMES = new Set([
+  '上一步文件名',
+  '上一步文件名称',
+  '上一步文件',
+  '上一步文档',
+  '上一步内容',
+  '上一步输出',
+  '上一步结果',
+  '上游文件名',
+  '上游文件名称',
+  '上游文档',
+  '上游内容',
+  '上游输出',
+  '前置文件名',
+  '前置文档',
+  '前置输出',
+]);
 
 export function extractTemplateFields(prompt) {
   const fields = [];
@@ -24,6 +44,22 @@ export function fillPromptTemplate(prompt, values) {
   return String(prompt || '')
     .replace(FIELD_PATTERN, replaceField)
     .replace(LEGACY_FIELD_PATTERN, replaceField);
+}
+
+export function isContextTemplateField(field) {
+  const normalized = String(field || '').replace(/\s+/g, '');
+  if (CONTEXT_FIELD_NAMES.has(normalized)) return true;
+  return /^(上一步|上游|前置|前一步|前序|上个Skill|上一Skill)/.test(normalized)
+    && /(文件|文档|内容|输出|结果|名称|路径|资料)/.test(normalized);
+}
+
+export function extractManualTemplateFields(prompt) {
+  return extractTemplateFields(prompt).filter((field) => !isContextTemplateField(field));
+}
+
+export function shouldOpenPromptFillDialog({ mode, template }) {
+  if (mode !== 'custom') return false;
+  return Boolean(String(template || '').trim());
 }
 
 function collectTemplateFields(prompt, pattern, fields, seen) {
@@ -52,8 +88,20 @@ export function normalizeImportedPromptRows(rows) {
       const category = readColumn(row, 'category').trim();
       const title = readColumn(row, 'title').trim();
       const description = readColumn(row, 'description').trim();
-      const prompt = readColumn(row, 'prompt').trim();
-      if (isTemplateInstructionRow({ category, title, description, prompt })) return null;
+      let reusePrompt = readColumn(row, 'reusePrompt').trim();
+      let customPrompt = readColumn(row, 'customPrompt').trim();
+      const legacyPrompt = readColumn(row, 'prompt').trim();
+      if (isTemplateInstructionRow({ category, title, description, prompt: legacyPrompt, reusePrompt, customPrompt })) return null;
+
+      if (!reusePrompt && !customPrompt && legacyPrompt) {
+        if (extractManualTemplateFields(legacyPrompt).length > 0) {
+          customPrompt = legacyPrompt;
+        } else {
+          reusePrompt = legacyPrompt;
+        }
+      }
+
+      const prompt = customPrompt || reusePrompt;
       if (!category || !title || !prompt) return null;
 
       return {
@@ -61,7 +109,9 @@ export function normalizeImportedPromptRows(rows) {
         title,
         description,
         prompt,
-        variables: extractTemplateFields(prompt),
+        reusePrompt,
+        customPrompt,
+        variables: extractTemplateFields(customPrompt),
       };
     })
     .filter(Boolean);
@@ -82,7 +132,19 @@ export function parseCsvRows(text) {
   return tableRowsToObjects(parseCsv(text));
 }
 
-export function mergeImportedPromptRows({ categories, prompts, rows, now = Date.now() }) {
+export function countImportedPromptConflicts({ categories, prompts, rows }) {
+  const categoryIdByLabel = new Map(
+    (categories || []).map((category) => [String(category.label || '').toLowerCase(), category.id]),
+  );
+  return (rows || []).filter((row) => {
+    const categoryId = categoryIdByLabel.get(String(row.category || '').toLowerCase());
+    if (!categoryId) return false;
+    const normalizedTitle = normalizePromptTitle(row.title);
+    return (prompts?.[categoryId] || []).some((prompt) => normalizePromptTitle(prompt.title) === normalizedTitle);
+  }).length;
+}
+
+export function mergeImportedPromptRows({ categories, prompts, rows, now = Date.now(), duplicateStrategy = 'append' }) {
   const nextCategories = (categories || []).map((category) => ({ ...category }));
   const nextPrompts = Object.fromEntries(
     Object.entries(prompts || {}).map(([categoryId, list]) => [categoryId, Array.isArray(list) ? [...list] : []]),
@@ -101,33 +163,71 @@ export function mergeImportedPromptRows({ categories, prompts, rows, now = Date.
       categoryIdByLabel.set(String(label || '').toLowerCase(), categoryId);
     }
 
+    const promptList = nextPrompts[categoryId] || [];
+    const duplicateIndex = promptList.findIndex((prompt) => normalizePromptTitle(prompt.title) === normalizePromptTitle(row.title));
+    if (duplicateIndex >= 0) {
+      if (duplicateStrategy === 'skip') return;
+      if (duplicateStrategy === 'replace') {
+        const targetList = [...promptList];
+        targetList[duplicateIndex] = createImportedPrompt(row, now + index, now, targetList[duplicateIndex]);
+        nextPrompts[categoryId] = targetList;
+        return;
+      }
+    }
+
+    const nextRow = duplicateIndex >= 0 && duplicateStrategy === 'copy'
+      ? { ...row, title: createPromptCopyTitle(row.title, promptList) }
+      : row;
     nextPrompts[categoryId] = [
-      ...(nextPrompts[categoryId] || []),
-      {
-        id: now + index,
-        title: row.title,
-        description: row.description || '导入的 Prompt',
-        prompt: row.prompt,
-        tags: row.tags || [],
-        outputMode: row.outputMode || 'copy',
-        enabled: row.enabled !== false,
-        variables: row.variables || extractTemplateFields(row.prompt),
-        usageCount: 0,
-        createdAt: now,
-        updatedAt: now,
-      },
+      ...promptList,
+      createImportedPrompt(nextRow, now + index, now),
     ];
   });
 
   return { categories: nextCategories, prompts: nextPrompts };
 }
 
-function isTemplateInstructionRow({ category, title, description, prompt }) {
+function createImportedPrompt(row, id, now, existing) {
+  return {
+    ...existing,
+    id: existing?.id ?? id,
+    title: row.title,
+    description: row.description || '导入的 Prompt',
+    prompt: row.prompt,
+    reusePrompt: row.reusePrompt || undefined,
+    customPrompt: row.customPrompt || undefined,
+    tags: row.tags || existing?.tags || [],
+    outputMode: row.outputMode || existing?.outputMode || 'copy',
+    enabled: row.enabled !== undefined ? row.enabled !== false : (existing?.enabled ?? true),
+    variables: row.variables || extractTemplateFields(row.customPrompt || row.prompt),
+    usageCount: existing?.usageCount ?? 0,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+}
+
+function createPromptCopyTitle(title, prompts) {
+  const baseTitle = String(title || '').trim() || '未命名 Prompt';
+  const usedTitles = new Set((prompts || []).map((prompt) => normalizePromptTitle(prompt.title)));
+  let copyTitle = `${baseTitle}（副本）`;
+  let index = 2;
+  while (usedTitles.has(normalizePromptTitle(copyTitle))) {
+    copyTitle = `${baseTitle}（副本 ${index}）`;
+    index += 1;
+  }
+  return copyTitle;
+}
+
+function isTemplateInstructionRow({ category, title, description, prompt, reusePrompt, customPrompt }) {
   return (
     category.startsWith('填写所属分类') &&
     title.startsWith('填写 Prompt 名称') &&
     description.startsWith('一句话说明用途') &&
-    prompt.startsWith('填写完整 Prompt')
+    (
+      prompt.startsWith('填写完整 Prompt') ||
+      reusePrompt.startsWith('上下文充足时直接调用') ||
+      customPrompt.startsWith('需要手动填写时使用')
+    )
   );
 }
 
@@ -152,6 +252,10 @@ function readColumn(row, key) {
 
 function normalizeColumnName(name) {
   return String(name || '').replace(/\s|_|-/g, '').toLowerCase();
+}
+
+function normalizePromptTitle(title) {
+  return String(title || '').trim().toLowerCase();
 }
 
 function createCategoryId(label, usedIds) {
