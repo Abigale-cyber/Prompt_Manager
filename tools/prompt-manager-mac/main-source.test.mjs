@@ -36,7 +36,7 @@ assert.match(source, /if let lastUsePromptAction,\n\s+lastUsePromptAction\.key =
 assert.match(source, /pastePromptIntoTargetApp\(targetApp, attempt: 0, shortcut: \.paste, requestId: item\.requestId, completion: completion\)/);
 assert.match(source, /private func pastePromptIntoTargetApp\(_ targetApp: NSRunningApplication, attempt: Int, shortcut: TargetShortcut, requestId: String\?, completion: \(\(Bool, String\) -> Void\)\? = nil\)/);
 assert.match(source, /private let focusSettleDelay: TimeInterval = 0\.18/);
-assert.match(source, /private let keyboardPasteSettleDelay: TimeInterval = 0\.08/);
+assert.match(source, /private let keyboardPasteSettleDelay: TimeInterval = 0\.25/);
 assert.match(source, /let settleDelay = shouldUseKeyboardPaste\(for: targetApp\) \? keyboardPasteSettleDelay : focusSettleDelay/);
 assert.match(source, /DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ settleDelay\)/);
 assert.match(source, /self\.pastePromptIntoTargetApp\(targetApp, attempt: attempt \+ 1, shortcut: shortcut, requestId: requestId, completion: completion\)/);

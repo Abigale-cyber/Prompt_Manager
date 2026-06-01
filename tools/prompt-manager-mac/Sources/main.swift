@@ -1642,7 +1642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastTargetApp: NSRunningApplication?
     private let usePromptDedupInterval: TimeInterval = 0.9
     private let focusSettleDelay: TimeInterval = 0.18
-    private let keyboardPasteSettleDelay: TimeInterval = 0.08
+    private let keyboardPasteSettleDelay: TimeInterval = 0.25
     private var lastUsePromptAction: (key: String, time: Date)?
     private var activationObserver: NSObjectProtocol?
 
