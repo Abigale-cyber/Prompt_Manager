@@ -374,7 +374,9 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
         guard let resourceURL = Bundle.main.resourceURL else { return }
         let webRoot = resourceURL.appendingPathComponent("web", isDirectory: true)
         let indexURL = webRoot.appendingPathComponent("index.html")
-        webView.loadFileURL(indexURL, allowingReadAccessTo: webRoot)
+        clearWebCacheThenLoad { [weak self] in
+            self?.webView.loadFileURL(indexURL, allowingReadAccessTo: webRoot)
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -829,6 +831,16 @@ final class PromptWebController: NSWindowController, WKNavigationDelegate, WKUID
     }
 }
 
+private func clearWebCacheThenLoad(_ load: @escaping () -> Void) {
+    let cacheTypes: Set<String> = [
+        WKWebsiteDataTypeDiskCache,
+        WKWebsiteDataTypeMemoryCache
+    ]
+    WKWebsiteDataStore.default().removeData(ofTypes: cacheTypes, modifiedSince: .distantPast) {
+        DispatchQueue.main.async(execute: load)
+    }
+}
+
 func jsString(_ string: String) -> String {
     if let data = try? JSONEncoder().encode(string),
        let encoded = String(data: data, encoding: .utf8) {
@@ -1036,7 +1048,9 @@ final class PromptDataController: NSObject, WKNavigationDelegate {
         guard let resourceURL = Bundle.main.resourceURL else { return }
         let webRoot = resourceURL.appendingPathComponent("web", isDirectory: true)
         let indexURL = webRoot.appendingPathComponent("index.html")
-        webView.loadFileURL(indexURL, allowingReadAccessTo: webRoot)
+        clearWebCacheThenLoad { [weak self] in
+            self?.webView.loadFileURL(indexURL, allowingReadAccessTo: webRoot)
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -1121,7 +1135,9 @@ final class PromptReactLauncherController: NSWindowController, WKScriptMessageHa
         guard let resourceURL = Bundle.main.resourceURL else { return }
         let webRoot = resourceURL.appendingPathComponent("web", isDirectory: true)
         let launcherURL = webRoot.appendingPathComponent("launcher.html")
-        webView.loadFileURL(launcherURL, allowingReadAccessTo: webRoot)
+        clearWebCacheThenLoad { [weak self] in
+            self?.webView.loadFileURL(launcherURL, allowingReadAccessTo: webRoot)
+        }
     }
 
     private func positionWindow(near app: NSRunningApplication?) {

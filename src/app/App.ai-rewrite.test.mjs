@@ -49,6 +49,8 @@ assert.match(source, /signal\?\.addEventListener\('abort', onAbort, \{ once: tru
 assert.match(source, /body: JSON\.stringify\(requestConfig\.body\),\n\s+signal,/);
 assert.match(source, /prompt-manager-ai-result/);
 assert.match(source, /AI 改写失败：\$\{formatAIErrorMessage\(error\)\}/);
+assert.match(source, /const formatImportErrorMessage = \(error: unknown\) =>/);
+assert.match(source, /showToast\(`导入失败：\$\{formatImportErrorMessage\(error\)\}`\)/);
 assert.match(source, /import \{ buildAIRewritePayload \} from '\.\/aiRewritePayload\.js';/);
 assert.match(source, /import \{ completeAIRewriteValues, extractAIRewriteValues, hasFilledAIRewriteValues \} from '\.\/aiRewriteResult\.js';/);
 assert.match(source, /max_tokens\?: number;/);
@@ -138,6 +140,7 @@ assert.match(source, /targetList\.splice\(sourceIndex, 0, updated\);/);
 assert.match(source, /const \[importConflictOpen, setImportConflictOpen\] = useState\(false\);/);
 assert.match(source, /const \[pendingImportRows, setPendingImportRows\] = useState<ImportedPrompt\[\]>\(\[\]\);/);
 assert.match(source, /const applyImportedRows = \(importedRows: ImportedPrompt\[\], duplicateStrategy/);
+assert.match(source, /readXlsxFile\(file,\s*\{\s*trim:\s*false\s*\}\)/);
 assert.match(source, /const duplicateCount = countImportedPromptConflicts\(\{ categories, prompts, rows: importedRows \}\);/);
 assert.match(source, /mergeImportedPromptRows\(\{ categories, prompts, rows: importedRows, duplicateStrategy \}\)/);
 assert.match(source, />覆盖已有</);

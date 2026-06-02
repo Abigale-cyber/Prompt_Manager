@@ -197,7 +197,7 @@ const parseImportedTable = async (file: File) => {
   }
 
   const readXlsxFile = (await import('read-excel-file/browser')).default;
-  const rows = await readXlsxFile(file);
+  const rows = await readXlsxFile(file, { trim: false });
   return tableRowsToObjects(rows) as Record<string, unknown>[];
 };
 
@@ -348,6 +348,11 @@ const parseAIResponseJSON = (body: string, status?: number) => {
 
 const formatAIErrorMessage = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error || '请求失败');
+  return message.length > 80 ? `${message.slice(0, 77)}...` : message;
+};
+
+const formatImportErrorMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || '请检查文件格式和表头');
   return message.length > 80 ? `${message.slice(0, 77)}...` : message;
 };
 
@@ -1025,8 +1030,9 @@ export default function App() {
         }
         queueImportedRows(importedRows);
       }
-    } catch {
-      showToast('导入失败，请检查文件格式和表头');
+    } catch (error) {
+      console.error('Prompt import failed', error);
+      showToast(`导入失败：${formatImportErrorMessage(error)}`);
     }
   };
 
@@ -1053,8 +1059,9 @@ export default function App() {
               : 'application/octet-stream';
       const blob = new Blob([bytes], { type });
       await importPromptFile(Object.assign(blob, { name: detail.filename }) as File);
-    } catch {
-      showToast('导入失败，请检查文件格式和表头');
+    } catch (error) {
+      console.error('Prompt native import failed', error);
+      showToast(`导入失败：${formatImportErrorMessage(error)}`);
     }
   };
 

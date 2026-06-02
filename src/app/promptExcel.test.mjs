@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { unzipSync, strFromU8 } from 'fflate';
+import { unzipSync, strFromU8, strToU8, zipSync } from 'fflate';
 import readXlsxFile from 'read-excel-file/node';
 import {
   buildPromptHistoryRows,
@@ -123,3 +123,74 @@ assert.deepEqual(
     },
   ],
 );
+
+const wpsRows = await readXlsxFile(new Blob([createWpsStylePromptWorkbookBytes()]), { trim: false });
+assert.deepEqual(
+  normalizeImportedPromptRows(tableRowsToObjects(wpsRows)),
+  [
+    {
+      category: '自媒体系统',
+      title: '系统导航',
+      description: '判断当前处在哪个阶段，并推荐下一步 Skill',
+      prompt: '$self-media-system\n请先读取前文，推荐下一步 Skill。',
+      reusePrompt: '$self-media-system\n请先读取前文，推荐下一步 Skill。',
+      customPrompt: '',
+      variables: [],
+    },
+  ],
+);
+
+function createWpsStylePromptWorkbookBytes() {
+  const worksheet = `<?xml version="1.0" encoding="utf-8"?>
+<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <x:sheetData>
+    <x:row r="1">
+      <x:c r="A1" t="inlineStr"><x:is><x:t xml:space="preserve">分类</x:t></x:is></x:c>
+      <x:c r="B1" t="inlineStr"><x:is><x:t xml:space="preserve">标题</x:t></x:is></x:c>
+      <x:c r="C1" t="inlineStr"><x:is><x:t xml:space="preserve">简介</x:t></x:is></x:c>
+      <x:c r="D1" t="inlineStr"><x:is><x:t xml:space="preserve">复用Prompt</x:t></x:is></x:c>
+      <x:c r="E1" t="inlineStr"><x:is><x:t xml:space="preserve">定制Prompt</x:t></x:is></x:c>
+    </x:row>
+    <x:row r="2">
+      <x:c r="A2" t="str"><x:v>自媒体系统</x:v></x:c>
+      <x:c r="B2" t="str"><x:v>系统导航</x:v></x:c>
+      <x:c r="C2" t="str"><x:v>判断当前处在哪个阶段，并推荐下一步 Skill</x:v></x:c>
+      <x:c r="D2" t="str"><x:v>$self-media-system&#10;请先读取前文，推荐下一步 Skill。</x:v></x:c>
+      <x:c r="E2" t="str"/>
+    </x:row>
+  </x:sheetData>
+</x:worksheet>`;
+
+  return zipSync({
+    '[Content_Types].xml': xlsxXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+</Types>`),
+    '_rels/.rels': xlsxXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`),
+    'xl/workbook.xml': xlsxXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <x:sheets>
+    <x:sheet name="Prompt导出" sheetId="1" r:id="rId1"/>
+  </x:sheets>
+</x:workbook>`),
+    'xl/_rels/workbook.xml.rels': xlsxXml(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+</Relationships>`),
+    'xl/sharedStrings.xml': xlsxXml(`<?xml version="1.0" encoding="utf-8"?>
+<x:sst xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>`),
+    'xl/worksheets/sheet1.xml': xlsxXml(worksheet),
+  }, { level: 6 });
+}
+
+function xlsxXml(xml) {
+  return strToU8(xml);
+}
