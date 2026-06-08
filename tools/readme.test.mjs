@@ -14,6 +14,8 @@ assert.match(readme, /## 使用方法/);
 assert.match(readme, /Mac 安装/);
 assert.match(readme, /Windows 安装/);
 assert.match(readme, /右键点击 .*打开/);
+assert.match(readme, /## 联系方式/);
+assert.match(readme, /assets\/wechat-contact\.png/);
 assert.doesNotMatch(readme, /本地 Prompt 管理小工具雏形/);
 assert.doesNotMatch(readme, /Figma 导出的 React UI/);
 assert.doesNotMatch(readme, /运行 Mac 小工具/);
